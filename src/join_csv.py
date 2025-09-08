@@ -49,6 +49,29 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def extract_dong_and_bunji(addr: str | float | int | None) -> tuple[str, str]:
+    """주소 문자열에서 동/번지 추출(보수적).
+    - 동: ([가-힣0-9]+동)
+    - 번지: 동 이후 산?숫자(-숫자) 패턴
+    """
+    import re
+    if addr is None:
+        return "", ""
+    s = str(addr).replace("\ufeff", "").strip()
+    s = re.sub(r"\s+", "", s)
+    m_d = re.search(r"([가-힣0-9]+동)", s)
+    dong = m_d.group(1) if m_d else ""
+    bunji = ""
+    if dong:
+        tail = s.split(dong, 1)[1]
+        m_b = re.search(r"산?([0-9]+(?:-[0-9]+)?)", tail)
+        bunji = m_b.group(1) if m_b else ""
+    else:
+        m_b = re.search(r"([0-9]+(?:-[0-9]+)?)", s)
+        bunji = m_b.group(1) if m_b else ""
+    return dong, bunji
+
+
 def main():
     repo_root = Path(__file__).resolve().parents[1]
     data_dir = Path(os.getenv("DATA_DIR", repo_root / "DATA"))
@@ -57,8 +80,7 @@ def main():
 
     # 입력 파일들
     files = [
-        "(250905)서울시 재개발 재건축 정비사업 현황.csv",
-        "(25년 3월기준) 서울시 정비사업 추진현황.csv",
+        "base_filtered_no_urban_redev.csv",
         "서울열린데이터광장_642건.csv",
         "정비몽땅_447건.csv",
     ]
@@ -117,20 +139,30 @@ def main():
 
     for fname in list(dfs.keys()):
         dfs[fname] = add_standard_keys_for_file(dfs[fname], fname)
+        # 위치 관련 파생 키 생성: 동_std, 번지_std (가능하면)
+        # 위치/법정동/행정동 등의 컬럼 후보를 찾아서 파생
+        cand_loc = [
+            "위치", "법정동", "행정동", "주소", "지번", "법정주소"
+        ]
+        col_loc = next((c for c in cand_loc if c in dfs[fname].columns), None)
+        if col_loc:
+            dongs, bunjis = zip(*dfs[fname][col_loc].map(extract_dong_and_bunji))
+            dfs[fname]["동_std"] = list(dongs)
+            dfs[fname]["번지_std"] = list(bunjis)
 
     # 병합 전략: 우선순위가 높은 테이블을 기준으로 left join 단계적 수행
-    # 기준 테이블: '(25년 3월기준) 서울시 정비사업 추진현황.csv' 있으면 그걸로, 없으면 첫 DF
-    base_name = "(25년 3월기준) 서울시 정비사업 추진현황.csv" if "(25년 3월기준) 서울시 정비사업 추진현황.csv" in dfs else next(iter(dfs))
+    base_name = "base_filtered_no_urban_redev.csv" if "base_filtered_no_urban_redev.csv" in dfs else next(iter(dfs))
     base = dfs[base_name]
     print(f"기준 테이블: {base_name} (shape={base.shape})")
 
+    # 더 세분화된 조인 키 우선순위(상단일수록 엄격)
     join_keys_priority = [
-        ["사업번호", "구역명"],
-        ["사업번호"],
-        ["구역명", "자치구", "법정동"],
+        ["구역명", "자치구", "동_std", "번지_std"],  # 명칭+행정동+번지
+        ["구역명", "자치구", "동_std"],
         ["구역명", "자치구"],
-        ["사업명", "자치구", "법정동"],
-        ["사업명", "자치구"],
+        ["사업명", "자치구", "동_std", "번지_std"],
+        ["사업명", "자치구", "동_std"],
+        ["사업명", "자치구"],                       # 가장 느슨
     ]
 
     # 기준 테이블에 조인키가 있는지 빠르게 점검
