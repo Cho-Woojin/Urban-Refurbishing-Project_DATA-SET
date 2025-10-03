@@ -14,6 +14,10 @@ __pycache__/
 /data/**/processed/
 /data/**/outputs/
 outputs/
+# Allow tracking Jupyter notebooks kept under notebooks/outputs (analysis artifacts)
+!notebooks/outputs/
+!notebooks/outputs/**/
+!notebooks/outputs/**/*.ipynb
 
 # OS files
 .DS_Store
