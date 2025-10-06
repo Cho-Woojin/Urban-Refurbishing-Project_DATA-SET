@@ -1,22 +1,22 @@
-"""Minimal geocoding + spatial pipeline utilities.
+"""최소 구성 지오코딩 + 공간 분석 파이프라인 유틸리티.
 
-This module centralizes logic originally embedded in the notebook so that:
-- Heavy / slow geocoding steps run once (can be scripted / automated)
-- Notebook can focus on visualization & exploration
+모듈 목적 (노트북에 흩어진 로직을 분리):
+- 느리고 무거운 지오코딩 단계는 한 번만 실행(스크립트/자동화 가능)
+- 노트북은 시각화/탐색에 집중
 
-External dependencies (keep minimal):
-  pandas, geopandas, shapely, geopy, folium(optional in notebook only)
+외부 의존성 (최소 유지):
+    pandas, geopandas, shapely, geopy (folium 은 노트북에서 선택적으로 사용)
 
-Public functions exported:
-  load_csv_multi, normalize_addr, simplify_addr,
-  load_cache, save_cache, geocode_primary, geocode_retry,
-  resolve_repo_root, find_shape_auto, get_shape_path,
-  load_seoul_boundary, build_points, spatial_join
+공개 함수:
+    load_csv_multi, normalize_addr, simplify_addr,
+    load_cache, save_cache, geocode_primary, geocode_retry,
+    resolve_repo_root, find_shape_auto, get_shape_path,
+    load_seoul_boundary, build_points, spatial_join
 
-Design notes:
-- All functions are side-effect free except geocoding (writes to df in-place) & cache I/O.
-- Geocoding uses Nominatim with RateLimiter; keep USER_AGENT distinct per project.
-- Spatial join restricted to within predicate (points assumed WGS84).
+설계 메모:
+- 지오코딩/캐시 I/O 를 제외한 모든 함수는 부작용(side-effect) 없음 (in-place 갱신 명시)
+- 지오코딩은 Nominatim + RateLimiter 사용 (USER_AGENT 프로젝트별 구분 권장)
+- 공간 조인은 within 기준 (포인트는 WGS84 가정)
 """
 from __future__ import annotations
 
@@ -29,17 +29,17 @@ import json, re, time, contextlib, os
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 
-# ---------------- Configuration (can be overridden externally) ----------------
+# ---------------- 설정 (외부에서 재정의 가능) ----------------
 CITY_DEFAULT = "서울특별시"
 USER_AGENT_DEFAULT = "seoul-redev-geocode"
 PROGRESS_INTERVAL = 50
 DEBUG = True
 
-# Minimal Seoul dong name set placeholder; for filtering boundaries (can be injected)
-# Full set should be passed from notebook if needed for performance/memory separation.
+# 서울 행정동 이름 세트 (경계 필터용 기본 빈 set)
+# 대규모 전체 목록은 노트북/스크립트에서 주입하여 메모리/로드 시점 분리 가능
 SEOUL_DONG_NAMES: set[str] = set()
 
-# ---------------- Debug / timing helpers ----------------
+# ---------------- 디버그 / 실행시간 측정 유틸 ----------------
 
 def debug(msg: str):
     if DEBUG:
@@ -54,7 +54,7 @@ def stage(name: str):
     finally:
         print(f"=== [{name}] 종료 ({time.time() - t0:.2f}s) ===")
 
-# ---------------- Path helpers ----------------
+# ---------------- 경로 관련 헬퍼 ----------------
 
 def resolve_repo_root(start: Path) -> Path:
     for p in [start, *start.parents]:
@@ -204,9 +204,14 @@ def geocode_retry(df: pd.DataFrame, cache: Dict[str, Tuple[float,float]], delay:
 # ---------------- 경계 / 공간조인 ----------------
 
 def load_seoul_boundary(shape_path: Path, dong_names: Optional[set[str]] = None) -> gpd.GeoDataFrame:
-    """Load Seoul boundary dissolved to GU level using best matching dong column.
-    dong_names: set of accepted dong names (if None -> SEOUL_DONG_NAMES global)
-    Returns: GeoDataFrame of dissolved GU polygons (EPSG:4326).
+    """서울 행정동 Shapefile 로드 후 행정동 컬럼 자동 선택 → 서울만 필터 → 자치구 단위 dissolve.
+
+    매개변수:
+      shape_path: Shapefile 경로
+      dong_names: 허용할 행정동 이름 집합 (None 인 경우 전역 SEOUL_DONG_NAMES 사용)
+
+    반환:
+      자치구 단위로 dissolve 된 GeoDataFrame (EPSG:4326 보장)
     """
     dong_names = dong_names if dong_names is not None else SEOUL_DONG_NAMES
     if not dong_names:
@@ -230,7 +235,7 @@ def load_seoul_boundary(shape_path: Path, dong_names: Optional[set[str]] = None)
         if best_rate <= 0:
             raise ValueError('서울 행정동 교집합이 0%')
         seoul_emd = all_emd[best_series.isin(dong_names)].copy()
-        # Identify GU column (name preference then code)
+        # 자치구 컬럼 탐색 (이름 우선 → 코드)
         lower_map_seoul = {c.lower(): c for c in seoul_emd.columns}
         sig_name_keys = ['sigungu_nm','sig_kor_nm','sig_nm','시군구명','sig_eng_nm']
         sig_code_keys = ['sig_cd','시군구코드']
@@ -247,7 +252,7 @@ def load_seoul_boundary(shape_path: Path, dong_names: Optional[set[str]] = None)
                 seoul_emd['SIG_CD_AUTOGEN'] = seoul_emd['EMD_CD'].astype(str).str.slice(0,5)
                 sig_col = 'SIG_CD_AUTOGEN'
             else:
-                # fallback pattern detection
+                # (폴백) 임의 문자열 컬럼에서 5자리 숫자 패턴 비율이 높으면 코드로 간주
                 for c in seoul_emd.columns:
                     if seoul_emd[c].dtype == object:
                         sample = seoul_emd[c].astype(str).str[:5]
