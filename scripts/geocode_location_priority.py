@@ -2,29 +2,35 @@
 """정비구역위치 1차, (자치구+법정동+대표지번) 2차 조합 기반 지오코딩 스크립트
 
 요구사항 반영:
-  1) 첫 주소 후보: 정비구역위치 원문 (도시 접두 자동 보강)
-  2) 1차 실패 시 주소 단순화(괄호/노이즈 제거, 번지 첫 항)
-  3) 2차: 자치구 + 법정동 + 대표지번 조합 (번지/동 부분추출 포함)
-  4) 최종 fallback: 자치구 + 법정동, 자치구 단독
+    1) 첫 주소 후보: 정비구역위치 원문 (도시 접두 자동 보강)
+    2) 1차 실패 시 주소 단순화(괄호/노이즈 제거, 번지 첫 항)
+    3) 2차: 자치구 + 법정동 + 대표지번 조합 (번지/동 부분추출 포함)
+    4) 최종 fallback: 자치구 + 법정동, 자치구 단독
 
 상태코드 예:
-  ok / ok_fallbackN, cache_ok*, simplified_ok, combo_ok, dong_ok, gu_only_ok, no_result, ssl_error
+    ok / ok_fallbackN, cache_ok*, simplified_ok, combo_ok, dong_ok, gu_only_ok, no_result, ssl_error
 
 캐시(JSON) 구조: { query: [lat, lon] }
 
 사용 예:
-    python scripts/geocode_location_priority.py \
-        --input outputs/주택정비형_정비구역지정이후.csv \
-        --out outputs/주택정비형_geocoded.csv \
-        --cache outputs/geocode_cache_location.json \
-        --delay 1.2
+        python scripts/geocode_location_priority.py \
+                --input outputs/핵심단계_구간포함_preprocessed.csv \
+                --out outputs/주택정비형_geocoded.csv \
+                --cache outputs/geocode_cache_location.json \
+                --append-latlon
 
-구버전 호환: 과거 예시에 있었던 --retry-simplify 옵션은 자동 단순화 로직으로 대체되었으며 지금은 의미 없는(no-op) 호환 플래그입니다.
+자동 output 파일명 생성 예시:
+        python scripts/geocode_location_priority.py \
+                --input outputs/주택정비형_신통.csv \
+                --out outputs/주택정비형_신통_geocoded_20240613_1530.csv \
+                --cache outputs/geocode_cache_location.json \
+                --append-latlon
+
 """
 from __future__ import annotations
 import argparse, json, re, sys
 from pathlib import Path
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Iterable
 import pandas as pd
 
 try:
@@ -50,6 +56,20 @@ BUNJI_TOKEN_RE = re.compile(r"(산)?(\d+)(?:-(\d+))?번?지?")  # 산25-3 / 25-3
 MULTI_SEPARATOR_RE = re.compile(r"[,·/]")
 
 CORE_COLS = ["정비구역위치","자치구","법정동","대표지번"]
+
+PRECISION_RANK_MAP = {
+    'dong_bunji_ok': 4,
+    'combo_ok': 4,
+    'combo_main_ok': 3,
+    'dong_main_ok': 3,
+    'dong_ok': 2,
+    'gu_dong_ok': 1,
+    'gu_only_ok': 0,
+    'refined_ok': 4,
+}
+
+COARSE_STATUSES = {'gu_only_ok','gu_dong_ok','dong_ok'}
+HIGH_STATUSES = {'dong_bunji_ok','combo_ok','combo_main_ok','dong_main_ok'}
 
 # ---------------- I/O ----------------
 
@@ -241,9 +261,28 @@ def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
             seen.add(q); uniq.append((q,t))
     return uniq
 
+def reorder_prefer_lot(candidates: List[Tuple[str,str]]) -> List[Tuple[str,str]]:
+    """지번 기반(combo_*, dong_bunji, dong_main 등) 후보를 loc_raw/loc_simplified 보다 앞으로 재배치.
+    이미 순서가 앞선 경우는 그대로.
+    """
+    if not candidates:
+        return candidates
+    lot_priority_tags_prefix = (
+        'combo_parsed_full','combo_full','combo_main_only','combo_full_no_san','combo_main_no_san',
+        'loc_dong_bunji_full','loc_dong_bunji','loc_dong_bunji_full_no_san','loc_dong_main','loc_dong_main_no_san'
+    )
+    lot_part=[]; others=[]
+    seen=set()
+    for q,t in candidates:
+        bucket = lot_part if t.startswith(lot_priority_tags_prefix) else others
+        if (q,t) not in seen:
+            bucket.append((q,t)); seen.add((q,t))
+    # loc_raw 가 lot 후보보다 이미 더 세밀하다면 (실제로는 아닐 가능성 크지만) 그대로 두어도 부작용 없음
+    return lot_part + [x for x in others if x not in lot_part]
+
 # ---------------- 지오코딩 ----------------
 
-def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool) -> pd.DataFrame:
+def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool, prefer_lot_first: bool=False) -> pd.DataFrame:
     if Nominatim is None or RateLimiter is None:
         print('[ERROR] geopy 미설치: pip install geopy'); return df
     geocode_func=None
@@ -272,6 +311,8 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
         iterator=df.iterrows()
     for idx,row in iterator:
         candidates=generate_candidates(row, city)
+        if prefer_lot_first:
+            candidates=reorder_prefer_lot(candidates)
         used_q=None; status='no_candidate'; lat=None; lon=None; used_tag=''
         for i,(q,tag) in enumerate(candidates):
             used_q=q; used_tag=tag
@@ -330,6 +371,106 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
     out['lat']=lats; out['lon']=lons; out['geocode_query']=queries; out['geocode_status']=statuses; out['geocode_tag']=tags
     return out
 
+def classify_precision(status: str) -> int:
+    return PRECISION_RANK_MAP.get(status, 2)
+
+def refine_coarse_rows(df_orig: pd.DataFrame, result: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool, max_refine: int=50) -> pd.DataFrame:
+    """coarse(저정밀) status 행에 대해 지번 기반 후보만 다시 시도.
+    max_refine: 과도한 API 호출 방지 상한.
+    """
+    if not network:
+        print('[REFINE] 네트워크 비활성 - refine 패스 생략')
+        return result
+    if Nominatim is None or RateLimiter is None:
+        print('[REFINE] geopy 미설치 - 생략')
+        return result
+    # 준비 (별도 RateLimiter 재사용)
+    try:
+        geolocator=Nominatim(user_agent=user_agent)
+        geocode_func=RateLimiter(geolocator.geocode, min_delay_seconds=delay, swallow_exceptions=False)
+    except Exception as e:
+        print('[REFINE] 초기화 실패:', e); return result
+
+    work = result.copy()
+    coarse_mask = work['geocode_status'].isin(COARSE_STATUSES) & work['대표지번'].notna()
+    target_indices = work[coarse_mask].index.tolist()[:max_refine]
+    if not target_indices:
+        print('[REFINE] coarse 대상 없음')
+        return work
+    improved=0
+    for idx in target_indices:
+        row = work.loc[idx]
+        orig_rank = classify_precision(row['geocode_status'])
+        base_candidates = generate_candidates(row, city)
+        # lot 기반만 추출 + '대한민국' 접미 변형 추가
+        filtered=[(q,t) for q,t in base_candidates if t.startswith(('combo','loc_dong_bunji','loc_dong_main'))]
+        extended=[]
+        for q,t in filtered:
+            extended.append((q,t))
+            if '대한민국' not in q:
+                extended.append((q+' 대한민국', t+'_kr'))
+        # 순서 재조정 (지번 우선)
+        extended=reorder_prefer_lot(extended)
+        new_lat=row['lat']; new_lon=row['lon']; new_status=row['geocode_status']; new_tag=row['geocode_tag']
+        for i,(q,t) in enumerate(extended):
+            if q in cache and cache[q][0] is not None and cache[q][1] is not None:
+                lat2,lon2=cache[q]
+                tmp_status='refined_ok' if t.startswith(('combo','loc_dong')) else 'cache_ok'
+                new_rank = classify_precision(tmp_status)
+                if new_rank>orig_rank or (lat2,lon2)!=(row['lat'],row['lon']):
+                    new_lat, new_lon, new_status, new_tag = lat2, lon2, tmp_status, t
+                    break
+                continue
+            try:
+                loc=geocode_func(q)
+            except Exception:
+                continue
+            if loc is None:
+                continue
+            lat2,lon2=loc.latitude, loc.longitude
+            cache[q]=(lat2,lon2)
+            tmp_status='refined_ok'
+            new_rank = classify_precision(tmp_status)
+            if new_rank>orig_rank or (lat2,lon2)!=(row['lat'],row['lon']):
+                new_lat, new_lon, new_status, new_tag = lat2, lon2, tmp_status, t
+                break
+        if (new_lat, new_lon, new_status)!=(row['lat'], row['lon'], row['geocode_status']):
+            work.at[idx,'lat']=new_lat; work.at[idx,'lon']=new_lon
+            work.at[idx,'geocode_status']=new_status; work.at[idx,'geocode_tag']=new_tag
+            improved+=1
+    print(f'[REFINE] 개선 행 수: {improved}/{len(target_indices)} (시도 {len(target_indices)})')
+    return work
+
+def dedupe_jitter(result: pd.DataFrame, jitter_radius: float=0.00015) -> pd.DataFrame:
+    """중복 좌표에 소량 방사형 jitter 적용. jitter_radius: degrees (~0.0001 ≈ 11m 위도).
+    원본 좌표는 lat_raw/lon_raw 컬럼으로 보존.
+    """
+    dup_groups = result.groupby(['lat','lon']).size()
+    multi = dup_groups[dup_groups>1]
+    if multi.empty:
+        return result
+    import math
+    work=result.copy()
+    if 'lat_raw' not in work.columns:
+        work['lat_raw']=work['lat']; work['lon_raw']=work['lon']
+    golden_angle = math.pi * (3 - math.sqrt(5))
+    for (lat,lon), count in multi.items():
+        idxs = work[(work['lat']==lat) & (work['lon']==lon)].index.tolist()
+        for k,i in enumerate(idxs):
+            if k==0:
+                continue  # 첫 점은 그대로
+            r = (k/ count) * jitter_radius
+            theta = k * golden_angle
+            # 위도/경도 단위 간 경도 보정 (위도에 따라 축소). cos(lat) 활용
+            lat_off = r * math.sin(theta)
+            lon_off = r * math.cos(theta) / max(math.cos(math.radians(lat)), 0.0001)
+            work.at[i,'lat']=lat+lat_off
+            work.at[i,'lon']=lon+lon_off
+    work['jitter_applied']=False
+    work.loc[work['lat']!=work['lat_raw'],'jitter_applied']=True
+    print(f"[DEDUP-JITTER] 적용: {multi.sum()-len(multi)}개 좌표에 분산 오프셋")
+    return work
+
 # ---------------- CLI ----------------
 
 def parse_args():
@@ -346,6 +487,13 @@ def parse_args():
     # Deprecated / backward compatibility: used previously in examples
     ap.add_argument('--retry-simplify', action='store_true', help='(Deprecated) 단순화 재시도 플래그 - 현재 자동 처리되어 무시됨')
     ap.add_argument('--full-output', action='store_true', help='전체 원본 컬럼 + geocode_* 상세 컬럼까지 포함 (기본은 lat,lon,success 최소)')
+    ap.add_argument('--append-latlon', action='store_true', help='원본 모든 컬럼 유지 + 맨 끝에 lat,lon 두 컬럼만 추가 (지오코딩 디버그 컬럼 제외)')
+    ap.add_argument('--prefer-lot-first', action='store_true', help='지번(본번/부번) 기반 combo_* 후보를 loc_raw 보다 먼저 시도하여 정밀도 향상')
+    ap.add_argument('--refine-coarse', action='store_true', help='coarse(gu_only/gu_dong/dong) 위치 행에 대해 2차 세밀 재시도 수행')
+    ap.add_argument('--max-refine', type=int, default=50, help='refine-coarse 재시도 최대 행 수(과도한 호출 방지)')
+    ap.add_argument('--dedupe-jitter', action='store_true', help='중복 좌표에 작은 jitter를 적용하여 시각적 겹침 최소화 (lat_raw/lon_raw 보존)')
+    ap.add_argument('--jitter-radius', type=float, default=0.00015, help='dedupe-jitter 적용시 최대 반경(degree)')
+    ap.add_argument('--debug-out', type=Path, help='append-latlon 모드에서도 디버그 전체 컬럼을 별도 경로에 저장')
     return ap.parse_args()
 
 # ---------------- main ----------------
@@ -364,24 +512,83 @@ def main():
     if args.max_rows:
         df=df.head(args.max_rows).copy()
     cache=load_cache(args.cache)
-    result=geocode_frame(df, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure)
+    result=geocode_frame(df, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, prefer_lot_first=args.prefer_lot_first)
+    # refine pass
+    if args.refine_coarse:
+        result = refine_coarse_rows(df, result, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, max_refine=args.max_refine)
     save_cache(cache, args.cache)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     # 성공여부 컬럼 생성
     result['success']=result['lat'].notna() & result['lon'].notna()
-    if not args.full_output:
-        minimal_df=result[['lat','lon','success']].copy()
-        if args.out.suffix.lower()=='.parquet':
-            minimal_df.to_parquet(args.out, index=False)
-        else:
-            minimal_df.to_csv(args.out, index=False, encoding='utf-8-sig')
-    else:
+    # 출력 모드 분기
+    if args.append_latlon and args.full_output:
+        print('[WARN] --append-latlon 과 --full-output 동시 지정 → --full-output 우선 적용')
+
+    if args.full_output:
+        # 디버그 포함 전체 출력
         if args.out.suffix.lower()=='.parquet':
             result.to_parquet(args.out, index=False)
         else:
             result.to_csv(args.out, index=False, encoding='utf-8-sig')
+    elif args.append_latlon:
+        # 원본 + lat, lon 두 컬럼만 추가
+        base_cols=[c for c in df.columns]
+        append_df=result[['lat','lon']]
+        merged = pd.concat([df.reset_index(drop=True), append_df.reset_index(drop=True)], axis=1)
+        # 혹시 기존에 lat/lon 이름이 이미 있었다면 충돌 방지를 위해 경고
+        dup = set(df.columns) & {'lat','lon'}
+        if dup:
+            print(f'[WARN] 원본에 이미 lat/lon 컬럼 존재: {dup} → 새 값으로 덮어씁니다.')
+        # dedupe jitter (append 모드에서도 적용 가능) - 원본은 수정하지 않음
+        if args.dedupe_jitter:
+            # jitter는 디버그 result에도 반영되도록 result 먼저 처리
+            result_for_jitter = result.copy()
+            result_for_jitter = dedupe_jitter(result_for_jitter, jitter_radius=args.jitter_radius)
+            # append 모드에서는 보정된 lat/lon 을 사용
+            merged['lat']=result_for_jitter['lat']
+            merged['lon']=result_for_jitter['lon']
+            # 필요시 jitter 원본 좌표 보존 파일(debug-out)에서 확인
+        if args.out.suffix.lower()=='.parquet':
+            merged.to_parquet(args.out, index=False)
+        else:
+            merged.to_csv(args.out, index=False, encoding='utf-8-sig')
+        # debug-out 저장 (원본 result 기준 혹은 jitter 적용 후)
+        if args.debug_out:
+            debug_df = result.copy()
+            if args.dedupe_jitter:
+                debug_df = dedupe_jitter(debug_df, jitter_radius=args.jitter_radius)
+            args.debug_out.parent.mkdir(parents=True, exist_ok=True)
+            if args.debug_out.suffix.lower()=='.parquet':
+                debug_df.to_parquet(args.debug_out, index=False)
+            else:
+                debug_df.to_csv(args.debug_out, index=False, encoding='utf-8-sig')
+            print(f"[DEBUG-OUT] 저장: {args.debug_out}")
+    else:
+        # 최소 출력 (기존 동작 유지)
+        minimal_df=result[['lat','lon','success']].copy()
+        if args.dedupe_jitter:
+            j2 = dedupe_jitter(result[['lat','lon']].assign(lat_raw=result['lat'], lon_raw=result['lon']).copy(), jitter_radius=args.jitter_radius)
+            minimal_df['lat']=j2['lat']; minimal_df['lon']=j2['lon']
+        if args.out.suffix.lower()=='.parquet':
+            minimal_df.to_parquet(args.out, index=False)
+        else:
+            minimal_df.to_csv(args.out, index=False, encoding='utf-8-sig')
+        if args.debug_out:
+            args.debug_out.parent.mkdir(parents=True, exist_ok=True)
+            if args.debug_out.suffix.lower()=='.parquet':
+                result.to_parquet(args.debug_out, index=False)
+            else:
+                result.to_csv(args.debug_out, index=False, encoding='utf-8-sig')
+            print(f"[DEBUG-OUT] 저장: {args.debug_out}")
     # 간단 통계
     stat=result['geocode_status'].value_counts(dropna=False).to_dict()
+    # coarse/precision 통계 (디버그 목적)
+    try:
+        precision_series = result['geocode_status'].map(classify_precision)
+        coarse_rate = (precision_series.isin([0,1,2]) & result['geocode_status'].isin(COARSE_STATUSES)).mean()
+        print(f"[STATS] coarse_rate={coarse_rate:.3f} (coarse statuses 비율)")
+    except Exception:
+        pass
     success=int(result['lat'].notna().sum())
     fail=int((result['lat'].isna()|result['lon'].isna()).sum())
     print(f"[DONE] rows={len(result)} success={success} fail={fail} status_dist={stat}")
@@ -389,8 +596,3 @@ def main():
 
 if __name__=='__main__':  # pragma: no cover
     sys.exit(main())
-
-import pandas as pd
-df = pd.read_csv('outputs/주택정비형_geocoded_full.csv')
-df[['lat','lon']].assign(success=df['lat'].notna() & df['lon'].notna()) \
-  .to_csv('outputs/주택정비형_geocoded_minimal.csv', index=False, encoding='utf-8-sig')
