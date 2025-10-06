@@ -10,14 +10,62 @@ __pycache__/
 # VS Code
 .vscode/
 
-# Data & outputs (keep raw data tracked; ignore processed if large)
+############################################################
+# Data & outputs (case-sensitive project DATA directory)
+# Strategy:
+#  - Keep small raw reference CSV/XLSX tracked (DATA/ root)
+#  - Ignore heavy generated artifacts: processed, cache, temp, exports
+#  - Ignore GIS heavy files while allowing a canonical boundary set
+#  - Allow notebooks/outputs for versioned analytical notebooks
+############################################################
+
+# Legacy lowercase patterns (retain for safety if used elsewhere)
 /data/**/processed/
 /data/**/outputs/
+
+# Project level generic outputs directory
 outputs/
-# Allow tracking Jupyter notebooks kept under notebooks/outputs (analysis artifacts)
+
+# Structured DATA subfolders (will create README + .gitkeep for semantics)
+DATA/cache/
+DATA/interim/
+DATA/processed/
+DATA/temp/
+DATA/exports/
+
+# Ignore everything inside those folders recursively
+DATA/cache/**
+DATA/interim/**
+DATA/processed/**
+DATA/temp/**
+DATA/exports/**
+
+# Allow placeholder keep files & README for documentation
+!DATA/**/.gitkeep
+!DATA/README.md
+
+# GIS / Shapefiles & spatial index heavy artifacts inside DATA unless explicitly whitelisted
+DATA/**/*.shp
+DATA/**/*.shx
+DATA/**/*.dbf
+DATA/**/*.cpg
+DATA/**/*.prj
+DATA/**/*.qpj
+DATA/**/*.sbx
+DATA/**/*.sbn
+DATA/**/*.geojson
+DATA/**/*.gpkg
+
+# Whitelist canonical administrative boundary directory (example) - adjust path as needed
+!DATA/BND_ADM_DONG_PG/**
+
+# Notebook output artifacts: keep notebooks but ignore large embedded export assets
 !notebooks/outputs/
 !notebooks/outputs/**/
 !notebooks/outputs/**/*.ipynb
+notebooks/outputs/**/*.png
+notebooks/outputs/**/*.pdf
+notebooks/outputs/**/*.html
 
 # OS files
 .DS_Store
