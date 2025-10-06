@@ -345,6 +345,7 @@ def parse_args():
     ap.add_argument('--max-rows', type=int)
     # Deprecated / backward compatibility: used previously in examples
     ap.add_argument('--retry-simplify', action='store_true', help='(Deprecated) 단순화 재시도 플래그 - 현재 자동 처리되어 무시됨')
+    ap.add_argument('--minimal', action='store_true', help='최종 CSV를 lat, lon, success 3개 컬럼만 포함')
     return ap.parse_args()
 
 # ---------------- main ----------------
@@ -366,10 +367,19 @@ def main():
     result=geocode_frame(df, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure)
     save_cache(cache, args.cache)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    if args.out.suffix.lower()=='.parquet':
-        result.to_parquet(args.out, index=False)
+    # 성공여부 컬럼 생성
+    result['success']=result['lat'].notna() & result['lon'].notna()
+    if args.minimal:
+        minimal_df=result[['lat','lon','success']].copy()
+        if args.out.suffix.lower()=='.parquet':
+            minimal_df.to_parquet(args.out, index=False)
+        else:
+            minimal_df.to_csv(args.out, index=False, encoding='utf-8-sig')
     else:
-        result.to_csv(args.out, index=False, encoding='utf-8-sig')
+        if args.out.suffix.lower()=='.parquet':
+            result.to_parquet(args.out, index=False)
+        else:
+            result.to_csv(args.out, index=False, encoding='utf-8-sig')
     # 간단 통계
     stat=result['geocode_status'].value_counts(dropna=False).to_dict()
     success=int(result['lat'].notna().sum())
