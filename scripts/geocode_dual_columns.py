@@ -34,9 +34,11 @@ import pandas as pd
 try:
     from geopy.geocoders import Nominatim  # type: ignore
     from geopy.extra.rate_limiter import RateLimiter  # type: ignore
+    from geopy.exc import GeocoderUnavailable  # type: ignore
 except Exception:  # pragma: no cover
     Nominatim = None  # type: ignore
     RateLimiter = None  # type: ignore
+    GeocoderUnavailable = Exception  # type: ignore
 
 # ---------------- 공통 유틸 ----------------
 ENCODINGS = ["utf-8-sig", "utf-8", "cp949", "euc-kr"]
@@ -139,11 +141,52 @@ def generate_candidates(row: pd.Series, col_a: str, col_b: str, city: str) -> Li
 
 # ---------------- 지오코딩 ----------------
 
-def geocode_df(df: pd.DataFrame, col_a: str, col_b: str, city: str, delay: float, cache: Dict[str, Tuple[float,float]], user_agent: str) -> pd.DataFrame:
+def geocode_df(
+    df: pd.DataFrame,
+    col_a: str,
+    col_b: str,
+    city: str,
+    delay: float,
+    cache: Dict[str, Tuple[float,float]],
+    user_agent: str,
+    network_enabled: bool,
+    insecure: bool,
+) -> pd.DataFrame:
+    """DataFrame 지오코딩 수행.
+
+    network_enabled=False 이면 캐시 조회만 수행하고, 없으면 상태를 cache_miss_network_off 로 둡니다.
+    insecure=True 인 경우 SSL 검증을 비활성화(디버그용, 운영 비권장).
+    """
     if Nominatim is None or RateLimiter is None:
         print("[ERROR] geopy 미설치: pip install geopy"); return df
-    geolocator = Nominatim(user_agent=user_agent)
-    geocode_func = RateLimiter(geolocator.geocode, min_delay_seconds=delay, swallow_exceptions=True)
+
+    geocode_func = None
+    if network_enabled:
+        if insecure:
+            # SSL 검증 비활성 세션 생성 (디버그 용도)
+            try:  # pragma: no cover
+                import requests, urllib3  # type: ignore
+                from geopy.adapters import RequestsAdapter  # type: ignore
+                urllib3.disable_warnings()  # 경고 억제
+                session = requests.Session()
+                session.verify = False  # 인증서 검증 비활성화
+                geolocator = Nominatim(
+                    user_agent=user_agent,
+                    adapter_factory=lambda **kw: RequestsAdapter(session=session, **kw),
+                )
+            except Exception as e:  # fallback
+                print(f"[WARN] insecure 모드 초기화 실패 → 일반 모드로 진행: {e}")
+                geolocator = Nominatim(user_agent=user_agent)
+        else:
+            geolocator = Nominatim(user_agent=user_agent)
+        # swallow_exceptions=False 로 두고 SSL 오류 등 구분
+        geocode_func = RateLimiter(
+            geolocator.geocode,
+            min_delay_seconds=delay,
+            swallow_exceptions=False,
+        )
+    else:
+        print("[INFO] 네트워크 비활성 모드: 캐시 조회만 수행합니다 (--disable-network).")
 
     queries: list[Optional[str]] = []
     statuses: list[str] = []
@@ -163,23 +206,46 @@ def geocode_df(df: pd.DataFrame, col_a: str, col_b: str, city: str, delay: float
         lat = None; lon = None
         for i, q in enumerate(cands):
             used_q = q
+            # 캐시 우선
             if q in cache:
                 lat, lon = cache[q]
                 if lat is not None and lon is not None:
                     status = "cache_ok" if i == 0 else f"cache_ok_fallback{i}"
                     break
                 else:
-                    status = "cache_na"  # continue
-            else:
-                loc = geocode_func(q)
-                if loc is not None:
-                    lat = loc.latitude; lon = loc.longitude
-                    cache[q] = (lat, lon)
-                    status = "ok" if i == 0 else f"ok_fallback{i}"
-                    break
+                    status = "cache_na"
+                    # 다음 후보로 계속
+                    continue
+            # 네트워크 비활성 모드이면 여기서 중단
+            if not network_enabled:
+                status = "cache_miss_network_off"
+                continue
+            # 실제 호출
+            try:
+                loc = geocode_func(q) if geocode_func else None
+            except GeocoderUnavailable as ge:  # SSL / 네트워크 장애 등
+                msg = str(ge)
+                if "CERTIFICATE_VERIFY_FAILED" in msg:
+                    status = "ssl_error"
                 else:
-                    cache[q] = (None, None)  # type: ignore
-                    status = "no_result"
+                    status = "unavailable"
+                # 실패 캐시 기록 (None)
+                cache[q] = (None, None)  # type: ignore
+                # SSL 오류는 다른 후보 시도 가치 낮음 → 다음 후보 계속
+                continue
+            except Exception as e:  # 기타 예외
+                status = "error"
+                cache[q] = (None, None)  # type: ignore
+                continue
+
+            if loc is not None:
+                lat = loc.latitude; lon = loc.longitude
+                cache[q] = (lat, lon)
+                status = "ok" if i == 0 else f"ok_fallback{i}"
+                break
+            else:
+                cache[q] = (None, None)  # type: ignore
+                status = "no_result"
         queries.append(used_q)
         statuses.append(status)
         lats.append(lat)
@@ -194,8 +260,21 @@ def geocode_df(df: pd.DataFrame, col_a: str, col_b: str, city: str, delay: float
 
 # ---------------- 재시도 ----------------
 
-def retry_simplify(df: pd.DataFrame, col_a: str, col_b: str, city: str, delay: float, cache: Dict[str, Tuple[float,float]], user_agent: str) -> int:
+def retry_simplify(
+    df: pd.DataFrame,
+    col_a: str,
+    col_b: str,
+    city: str,
+    delay: float,
+    cache: Dict[str, Tuple[float,float]],
+    user_agent: str,
+    network_enabled: bool,
+    insecure: bool,
+) -> int:
     if Nominatim is None or RateLimiter is None:
+        return 0
+    if not network_enabled:
+        print('[INFO] 네트워크 비활성 모드 - 재시도 스킵')
         return 0
     geolocator = Nominatim(user_agent=user_agent)
     geocode_func = RateLimiter(geolocator.geocode, min_delay_seconds=delay, swallow_exceptions=True)
@@ -238,6 +317,8 @@ def parse_args():
     ap.add_argument('--max-rows', type=int, help='상위 N행만 처리(테스트용)')
     ap.add_argument('--failures-out', type=Path, help='지오코딩 실패행 CSV 출력 경로')
     ap.add_argument('--user-agent', default='dual-geocoder-cli', help='Nominatim User-Agent')
+    ap.add_argument('--disable-network', action='store_true', help='네트워크 호출 비활성화(캐시 조회만)')
+    ap.add_argument('--insecure', action='store_true', help='SSL 인증서 검증 비활성화 (디버그용, 운영 비권장)')
     return ap.parse_args()
 
 # ---------------- main ----------------
@@ -256,10 +337,30 @@ def main():
             return 3
 
     cache = load_cache(args.cache)
-    result = geocode_df(df, args.col_a, args.col_b, args.city_prefix, args.delay, cache, args.user_agent)
+    result = geocode_df(
+        df,
+        args.col_a,
+        args.col_b,
+        args.city_prefix,
+        args.delay,
+        cache,
+        args.user_agent,
+        network_enabled=not args.disable_network,
+        insecure=args.insecure,
+    )
 
     if args.retry_simplify:
-        added = retry_simplify(result, args.col_a, args.col_b, args.city_prefix, args.delay, cache, args.user_agent)
+        added = retry_simplify(
+            result,
+            args.col_a,
+            args.col_b,
+            args.city_prefix,
+            args.delay,
+            cache,
+            args.user_agent,
+            network_enabled=not args.disable_network,
+            insecure=args.insecure,
+        )
         print(f'[INFO] 단순화 재시도 추가 성공: {added}')
 
     # 실패행 저장(옵션)
