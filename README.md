@@ -87,7 +87,6 @@ subset 생성 시 컬럼 드롭 금지; 행 필터만 수행.
 | 많은 좌표 동일 | fallback(자치구/동) 과다 | lot-first + refine-coarse 재실행 |
 | syn subset 시 컬럼 소실 | copy 후 drop 수행 | 행 필터만 하고 to_csv |
 | jitter 후 실제 좌표 필요 | jitter가 시각화용 | `lat_raw/lon_raw` 사용 |
-
 ## 커밋 규칙 (제안)
 - `feat:` 기능 추가, `fix:` 버그 수정, `docs:` 문서, `chore:` 반복작업/환경, `data:` 데이터 스키마 변경/매핑 추가
 - 작은 단위로 커밋, 실행 가능 상태를 유지
