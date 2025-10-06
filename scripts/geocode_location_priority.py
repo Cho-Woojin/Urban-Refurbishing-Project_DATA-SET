@@ -345,7 +345,7 @@ def parse_args():
     ap.add_argument('--max-rows', type=int)
     # Deprecated / backward compatibility: used previously in examples
     ap.add_argument('--retry-simplify', action='store_true', help='(Deprecated) 단순화 재시도 플래그 - 현재 자동 처리되어 무시됨')
-    ap.add_argument('--minimal', action='store_true', help='최종 CSV를 lat, lon, success 3개 컬럼만 포함')
+    ap.add_argument('--full-output', action='store_true', help='전체 원본 컬럼 + geocode_* 상세 컬럼까지 포함 (기본은 lat,lon,success 최소)')
     return ap.parse_args()
 
 # ---------------- main ----------------
@@ -369,7 +369,7 @@ def main():
     args.out.parent.mkdir(parents=True, exist_ok=True)
     # 성공여부 컬럼 생성
     result['success']=result['lat'].notna() & result['lon'].notna()
-    if args.minimal:
+    if not args.full_output:
         minimal_df=result[['lat','lon','success']].copy()
         if args.out.suffix.lower()=='.parquet':
             minimal_df.to_parquet(args.out, index=False)
