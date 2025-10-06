@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+.env/
+
+# VS Code
+.vscode/
+
+# Data & outputs (keep raw data tracked; ignore processed if large)
+/data/**/processed/
+/data/**/outputs/
+outputs/
+# Allow tracking Jupyter notebooks kept under notebooks/outputs (analysis artifacts)
+!notebooks/outputs/
+!notebooks/outputs/**/
+!notebooks/outputs/**/*.ipynb
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+logs/
+*.log
