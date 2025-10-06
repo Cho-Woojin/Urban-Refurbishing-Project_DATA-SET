@@ -50,14 +50,7 @@ DATA/**/*.gpkg
 # Whitelist canonical boundary set (kept for now)
 !DATA/BND_ADM_DONG_PG/**
 
-# Notebook output artifacts: keep notebooks but ignore large embedded export assets
-!notebooks/outputs/
-!notebooks/outputs/**/
-!notebooks/outputs/**/*.ipynb
-# Ignore rich export artifacts under notebooks/outputs but keep notebooks
-notebooks/outputs/**/*.png
-notebooks/outputs/**/*.pdf
-notebooks/outputs/**/*.html
+# (Removed) notebooks/outputs rules cleaned up after consolidation into root outputs/
 
 # OS files
 .DS_Store
