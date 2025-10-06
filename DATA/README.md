@@ -2,22 +2,18 @@
 
 This repository separates data assets by lifecycle stage to keep Git lean while preserving essential reference datasets.
 
-## Folders
+## Folders (Simplified)
 
-- raw/        : Original source files (small CSV/XLSX or authoritative shapefile set). Minimal/manual edits only.
-- external/   : Third-party supplemental reference (codes, lookup tables). Treat as read-only snapshots.
-- interim/    : In-progress transformation outputs (joins, normalization, temp merges). Auto-regenerated.
-- processed/  : Clean, analysis-ready curated datasets for modeling/visualization.
-- cache/      : Ephemeral geocoding caches, API responses, derived indices.
-- temp/       : (Optional) One-off scratch exports not meant for versioning.
-- exports/    : Final published deliverables (charts, packaged CSVs) – usually large, ignored.
+- raw/        : Original source files (받은 그대로·필수 참조). 소형 CSV/XLSX 또는 선택한 행정경계(shapefile). 최소만 Git 추적.
+- processed/  : 분석·시각화 즉시 활용 최종 정제본 (스크립트로 재생성 가능, 대용량은 커밋 피하기 권장).
+- cache/      : 지오코딩 캐시(JSON), API 응답, 임시 파생 인덱스 (전부 재생성 가능. 기본 ignore).
 
 ## Git Tracking Rules
 
-- Keep: raw/, external/ small stable files; canonical boundary shapefile folder (BND_ADM_DONG_PG) whitelisted.
-- Ignore: interim/, processed/, cache/, temp/, exports/ (patterned in .gitignore).
-- Shapefiles: All *.shp/.shx/.dbf/... ignored except explicit whitelist path(s).
-- Large notebook artifacts (.png/.html) under notebooks/outputs are ignored; *.ipynb kept.
+- Keep: 선택한 raw 소스 + 필요하면 단일 경계폴더(`BND_ADM_DONG_PG`).
+- Ignore: processed/ (내용), cache/ (내용) → `.gitignore` 에서 재귀 패턴 처리.
+- Shapefiles: 기본적으로 무시, 화이트리스트 폴더만 예외 유지.
+- Notebook 산출(이미지/HTML)은 추적 안 함; `.ipynb`만 유지.
 
 ## Naming Conventions
 
@@ -36,24 +32,25 @@ This repository separates data assets by lifecycle stage to keep Git lean while 
 
 ## Adding New Authoritative Data
 
-1. Place original file in raw/ (or external/ if third-party reference).
-2. Record source URL/date in a header comment at top of README or separate SOURCES.md.
-3. Run transformation pipeline → outputs land in interim/ then curated copy optionally promoted to processed/.
+1. 새 원본 → raw/ 배치 (가능하면 파일명에 날짜 또는 출처 약어 포함).
+2. 출처(URL, 수집일) README 상단 또는 `SOURCES.md`(선택) 기록.
+3. 스크립트 실행 → 결과를 processed/ 로 생성 (원본 수정 금지, 재생성 가능 상태 유지).
 
 ## Whitelisting Additional Shapefiles
 
-If a new boundary/reference geometry must be versioned:
-- Create a dedicated folder under DATA/ (e.g., DATA/BND_<NAME>_PG)
-- Add an exception line to .gitignore: `!DATA/BND_<NAME>_PG/**`
-- Keep only essential files (.shp, .shx, .dbf, .prj, .cpg) and remove huge duplicates.
+새로운 행정/분석 경계를 Git에 포함하려면:
+1. `DATA/BND_<NAME>_PG/` 폴더 생성
+2. `.gitignore` 에 예외 추가: `!DATA/BND_<NAME>_PG/**`
+3. 필수 파일(.shp/.shx/.dbf/.prj/.cpg)만 유지 (거대한 중복/추가 인덱스 삭제)
 
 ## Cleanup Guidance
 
-- Periodically purge cache/, interim/, temp/ to avoid stale artifacts.
-- Before committing, ensure no large binary slipped past ignore patterns.
+- cache/ 내부 캐시 JSON 오래된 것 수시 삭제 가능.
+- processed/ 결과가 많아 용량 커지면 필요 최소만 남기고 재생성 전략 유지.
+- 커밋 전에 대형 바이너리(raw 제외)가 추적되지 않았는지 확인.
 
 ## Future Enhancements
 
-- Optional DVC or Git LFS integration for very large stable assets.
-- Hash manifest for raw/ integrity verification.
+- (선택) DVC 또는 Git LFS: raw 파일이 커질 경우 고려.
+- raw 무결성 해시(manifest) 자동 생성 스크립트.
 

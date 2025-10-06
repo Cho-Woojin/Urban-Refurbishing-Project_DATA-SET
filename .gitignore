@@ -26,43 +26,35 @@ __pycache__/
 # Project level generic outputs directory
 outputs/
 
-# Structured DATA subfolders (will create README + .gitkeep for semantics)
-DATA/cache/
-DATA/interim/
+## Simplified DATA subfolders (keep only raw, processed, cache)
 DATA/processed/
-DATA/temp/
-DATA/exports/
+DATA/cache/
 
-# Ignore everything inside those folders recursively
-DATA/cache/**
-DATA/interim/**
+# Ignore contents of processed & cache (raw stays tracked)
 DATA/processed/**
-DATA/temp/**
-DATA/exports/**
+DATA/cache/**
 
 # Allow placeholder keep files & README for documentation
 !DATA/**/.gitkeep
 !DATA/README.md
 
-# GIS / Shapefiles & spatial index heavy artifacts inside DATA unless explicitly whitelisted
+# GIS heavy files ignored globally except explicit whitelist (optional remove if you want to track)
 DATA/**/*.shp
 DATA/**/*.shx
 DATA/**/*.dbf
 DATA/**/*.cpg
 DATA/**/*.prj
-DATA/**/*.qpj
-DATA/**/*.sbx
-DATA/**/*.sbn
 DATA/**/*.geojson
 DATA/**/*.gpkg
 
-# Whitelist canonical administrative boundary directory (example) - adjust path as needed
+# Whitelist canonical boundary set (kept for now)
 !DATA/BND_ADM_DONG_PG/**
 
 # Notebook output artifacts: keep notebooks but ignore large embedded export assets
 !notebooks/outputs/
 !notebooks/outputs/**/
 !notebooks/outputs/**/*.ipynb
+# Ignore rich export artifacts under notebooks/outputs but keep notebooks
 notebooks/outputs/**/*.png
 notebooks/outputs/**/*.pdf
 notebooks/outputs/**/*.html
