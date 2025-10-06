@@ -40,6 +40,13 @@ PAREN_RE = re.compile(r"\(.*?\)")
 MULTI_BUNJI_RE = re.compile(r"[,·]\s*산?\d+(?:-\d+)?")
 BUNJI_HEAD_RE = re.compile(r"산?\d+(?:-\d+)?")
 
+# 정교한 번지(산/본번/부번) 추출용 정규식
+DONG_RE = re.compile(r"([가-힣0-9]+동)")
+BUNJI_TOKEN_RE = re.compile(r"(산)?(\d+)(?:-(\d+))?번?지?")  # 산25-3 / 25-3 / 25 형태
+
+# 다중 번지 구분자 (콤마, 중점, 슬래시 등) → 첫 번지만 활용
+MULTI_SEPARATOR_RE = re.compile(r"[,·/]")
+
 CORE_COLS = ["정비구역위치","자치구","법정동","대표지번"]
 
 # ---------------- I/O ----------------
@@ -103,18 +110,59 @@ def simplify_location(s: str) -> str:
             s=head
     return s
 
-def extract_dong_bunji(s: str) -> Tuple[str,str]:
-    raw=re.sub(r"\s+","",s or '')
+def parse_bunji(raw: str) -> Optional[Dict[str,str]]:
+    """번지 문자열에서 산 여부 / 본번 / 부번 추출.
+    반환: { 'san': 'Y'|'N', 'main': 본번(str), 'sub': 부번(str|''), 'repr': 표시용원문 }
+    여러 번지가 포함될 경우 첫 번지(정렬순)만 사용.
+    """
     if not raw:
-        return '', ''
-    m_d=re.search(r"([가-힣0-9]+동)", raw)
-    dong=m_d.group(1) if m_d else ''
-    bunji=''
-    if dong:
-        tail=raw.split(dong,1)[1]
-        m_b=re.search(r"산?([0-9]+(?:-[0-9]+)?)", tail)
-        bunji=m_b.group(1) if m_b else ''
-    return dong, bunji
+        return None
+    txt = raw.strip()
+    # 다중 분리 → 첫 토큰만
+    parts = MULTI_SEPARATOR_RE.split(txt)
+    if parts:
+        txt = parts[0].strip()
+    # '외 2필지' 제거
+    txt = re.sub(r"외\s*\d+필지", "", txt)
+    m = BUNJI_TOKEN_RE.search(txt)
+    if not m:
+        return None
+    san_flag, main, sub = m.group(1) or '', m.group(2), m.group(3) or ''
+    return {
+        'san': 'Y' if san_flag else 'N',
+        'main': main,
+        'sub': sub,
+        'repr': (san_flag or '') + main + (('-' + sub) if sub else '')
+    }
+
+def extract_dong_bunji_detailed(s: str) -> Tuple[str, Optional[Dict[str,str]]]:
+    """문장에서 동 + 번지(산/본/부) 조합 추출. 번지는 dict 형태.
+    예: '종로구 사직동 12-3 일대' -> ('사직동', {'san':'N','main':'12','sub':'3','repr':'12-3'})
+    """
+    if not s:
+        return '', None
+    s_norm = re.sub(r"\s+", "", s)
+    m_d = DONG_RE.search(s_norm)
+    if not m_d:
+        return '', None
+    dong = m_d.group(1)
+    tail = s_norm.split(dong, 1)[1]
+    m_b = BUNJI_TOKEN_RE.search(tail)
+    if not m_b:
+        return dong, None
+    san_flag, main, sub = m_b.group(1) or '', m_b.group(2), m_b.group(3) or ''
+    return dong, {
+        'san': 'Y' if san_flag else 'N',
+        'main': main,
+        'sub': sub,
+        'repr': (san_flag or '') + main + (('-' + sub) if sub else '')
+    }
+
+def extract_dong_bunji(s: str) -> Tuple[str,str]:  # 유지: 기존 인터페이스 (하위호환)
+    dong, info = extract_dong_bunji_detailed(s)
+    if not info:
+        return dong, ''
+    return dong, info['repr']
 
 # ---------------- 후보 생성 ----------------
 
@@ -127,7 +175,8 @@ def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
     loc = normalize_base(row.get('정비구역위치'))
     gu = normalize_base(row.get('자치구'))
     dong = normalize_base(row.get('법정동'))
-    main = normalize_base(row.get('대표지번'))
+    main_raw = normalize_base(row.get('대표지번'))
+    bunji_info = parse_bunji(main_raw) if main_raw else None
 
     if loc:
         out.append((normalize_city_prefix(loc, city),'loc_raw'))
@@ -135,15 +184,47 @@ def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
         if simp and simp != loc:
             out.append((normalize_city_prefix(simp, city),'loc_simplified'))
     # 조합 (자치구 + 법정동 + 대표지번)
-    if gu and dong and main:
-        out.append((normalize_city_prefix(f"{gu} {dong} {main}", city),'combo_full'))
+    if gu and dong and main_raw:
+        # 대표지번 전체 (원문 그대로)
+        out.append((normalize_city_prefix(f"{gu} {dong} {main_raw}", city),'combo_full'))
+        # 파싱 성공 시 본번/본번-부번 변형 후보 추가
+        if bunji_info:
+            # 산 여부 유지/비유지 버전
+            san_prefix = '산' if bunji_info['san']=='Y' else ''
+            if bunji_info['sub']:
+                # full (산여부+본-부)
+                out.append((normalize_city_prefix(f"{gu} {dong} {san_prefix}{bunji_info['main']}-{bunji_info['sub']}", city),'combo_parsed_full'))
+                # 본번만 (산여부 유지)
+                out.append((normalize_city_prefix(f"{gu} {dong} {san_prefix}{bunji_info['main']}", city),'combo_main_only'))
+                # 산 제거 변형(산 번지일 경우) - 일부 데이터 소스가 산 누락
+                if bunji_info['san']=='Y':
+                    out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']}-{bunji_info['sub']}", city),'combo_full_no_san'))
+                    out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']}", city),'combo_main_no_san'))
+            else:
+                # 부번 없음 → 산 있는/없는 2종
+                if bunji_info['san']=='Y':
+                    out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']}", city),'combo_main_no_san'))
     # 동+번지 추출
     if loc:
-        d2,b2=extract_dong_bunji(loc)
-        if d2 and b2:
-            out.append((normalize_city_prefix(f"{d2} {b2}", city),'loc_dong_bunji'))
-        if d2:
-            out.append((normalize_city_prefix(d2, city),'loc_dong'))
+        d2_info, bunji2 = extract_dong_bunji(loc)
+        if d2_info and bunji2:
+            # 상세 파싱 재시도
+            _, detailed = extract_dong_bunji_detailed(loc)
+            if detailed:
+                san_prefix = '산' if detailed['san']=='Y' else ''
+                if detailed['sub']:
+                    out.append((normalize_city_prefix(f"{d2_info} {san_prefix}{detailed['main']}-{detailed['sub']}", city),'loc_dong_bunji_full'))
+                    out.append((normalize_city_prefix(f"{d2_info} {san_prefix}{detailed['main']}", city),'loc_dong_main'))
+                    if detailed['san']=='Y':
+                        out.append((normalize_city_prefix(f"{d2_info} {detailed['main']}-{detailed['sub']}", city),'loc_dong_bunji_full_no_san'))
+                else:
+                    out.append((normalize_city_prefix(f"{d2_info} {san_prefix}{detailed['main']}", city),'loc_dong_main'))
+                    if detailed['san']=='Y':
+                        out.append((normalize_city_prefix(f"{d2_info} {detailed['main']}", city),'loc_dong_main_no_san'))
+            # 원래 추출 문자열 (하위호환 태그)
+            out.append((normalize_city_prefix(f"{d2_info} {bunji2}", city),'loc_dong_bunji'))
+        if d2_info:
+            out.append((normalize_city_prefix(d2_info, city),'loc_dong'))
     # fallback: 자치구+법정동, 자치구 단독
     if gu and dong:
         out.append((normalize_city_prefix(f"{gu} {dong}", city),'gu_dong'))
@@ -222,10 +303,14 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
                     status='ok'
                 elif tag=='loc_simplified':
                     status='simplified_ok'
-                elif tag=='combo_full':
+                elif tag in ('combo_full','combo_parsed_full','combo_full_no_san'):
                     status='combo_ok'
-                elif tag=='loc_dong_bunji':
+                elif tag in ('combo_main_only','combo_main_no_san'):
+                    status='combo_main_ok'
+                elif tag in ('loc_dong_bunji','loc_dong_bunji_full','loc_dong_bunji_full_no_san'):
                     status='dong_bunji_ok'
+                elif tag in ('loc_dong_main','loc_dong_main_no_san'):
+                    status='dong_main_ok'
                 elif tag=='loc_dong':
                     status='dong_ok'
                 elif tag=='gu_dong':
