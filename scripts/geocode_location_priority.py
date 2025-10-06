@@ -389,3 +389,8 @@ def main():
 
 if __name__=='__main__':  # pragma: no cover
     sys.exit(main())
+
+import pandas as pd
+df = pd.read_csv('outputs/주택정비형_geocoded_full.csv')
+df[['lat','lon']].assign(success=df['lat'].notna() & df['lon'].notna()) \
+  .to_csv('outputs/주택정비형_geocoded_minimal.csv', index=False, encoding='utf-8-sig')
