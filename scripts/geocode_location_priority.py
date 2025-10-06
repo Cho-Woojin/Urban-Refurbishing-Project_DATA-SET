@@ -13,11 +13,13 @@
 캐시(JSON) 구조: { query: [lat, lon] }
 
 사용 예:
-  python scripts/geocode_location_priority.py \
-    --input outputs/주택정비형_정비구역지정이후.csv \
-    --out outputs/주택정비형_geocoded.csv \
-    --cache outputs/geocode_cache_location.json \
-    --delay 1.2 --retry-simplify
+    python scripts/geocode_location_priority.py \
+        --input outputs/주택정비형_정비구역지정이후.csv \
+        --out outputs/주택정비형_geocoded.csv \
+        --cache outputs/geocode_cache_location.json \
+        --delay 1.2
+
+구버전 호환: 과거 예시에 있었던 --retry-simplify 옵션은 자동 단순화 로직으로 대체되었으며 지금은 의미 없는(no-op) 호환 플래그입니다.
 """
 from __future__ import annotations
 import argparse, json, re, sys
@@ -341,12 +343,16 @@ def parse_args():
     ap.add_argument('--disable-network', action='store_true')
     ap.add_argument('--insecure', action='store_true')
     ap.add_argument('--max-rows', type=int)
+    # Deprecated / backward compatibility: used previously in examples
+    ap.add_argument('--retry-simplify', action='store_true', help='(Deprecated) 단순화 재시도 플래그 - 현재 자동 처리되어 무시됨')
     return ap.parse_args()
 
 # ---------------- main ----------------
 
 def main():
     args=parse_args()
+    if getattr(args, 'retry_simplify', False):
+        print('[INFO] --retry-simplify 플래그는 더 이상 필요하지 않아 무시됩니다 (자동 단순화 내장).')
     if not args.input.exists():
         print('[ERROR] 입력 없음', args.input); return 2
     df=read_csv_multi(args.input)
