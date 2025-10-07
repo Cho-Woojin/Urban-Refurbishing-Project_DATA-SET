@@ -215,7 +215,7 @@ def extract_dong_bunji(s: str) -> Tuple[str,str]:  # 유지: 기존 인터페이
 
 # ---------------- 후보 생성 ----------------
 
-def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
+def generate_candidates(row: pd.Series, city: str, pad_lot_width: int=0, add_lot_suffix: bool=False) -> List[Tuple[str,str]]:
     """후보 (query, tag) 리스트.
     tag: 어떤 전략으로 나온 후보인지(우선순위/출처 표시)
     우선순위 순으로 append
@@ -226,6 +226,12 @@ def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
     dong = normalize_base(row.get('법정동'))
     main_raw = normalize_base(row.get('대표지번'))
     bunji_info = parse_bunji(main_raw) if main_raw else None
+    padded_main=None
+    if bunji_info and pad_lot_width>0:
+        try:
+            padded_main = bunji_info['main'].zfill(pad_lot_width)
+        except Exception:
+            padded_main=None
 
     if loc:
         out.append((normalize_city_prefix(loc, city),'loc_raw'))
@@ -236,6 +242,10 @@ def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
     if gu and dong and main_raw:
         # 대표지번 전체 (원문 그대로)
         out.append((normalize_city_prefix(f"{gu} {dong} {main_raw}", city),'combo_full'))
+        if add_lot_suffix:
+            out.append((normalize_city_prefix(f"{gu} {dong} {main_raw} 번지", city),'combo_full_suffix'))
+        if padded_main and bunji_info and padded_main!=bunji_info.get('main',''):
+            out.append((normalize_city_prefix(f"{gu} {dong} {padded_main}", city),'combo_full_padded'))
         # 파싱 성공 시 본번/본번-부번 변형 후보 추가
         if bunji_info:
             # 산 여부 유지/비유지 버전
@@ -245,14 +255,24 @@ def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
                 out.append((normalize_city_prefix(f"{gu} {dong} {san_prefix}{bunji_info['main']}-{bunji_info['sub']}", city),'combo_parsed_full'))
                 # 본번만 (산여부 유지)
                 out.append((normalize_city_prefix(f"{gu} {dong} {san_prefix}{bunji_info['main']}", city),'combo_main_only'))
+                if add_lot_suffix:
+                    out.append((normalize_city_prefix(f"{gu} {dong} {san_prefix}{bunji_info['main']} 번지", city),'combo_main_only_suffix'))
                 # 산 제거 변형(산 번지일 경우) - 일부 데이터 소스가 산 누락
                 if bunji_info['san']=='Y':
                     out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']}-{bunji_info['sub']}", city),'combo_full_no_san'))
                     out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']}", city),'combo_main_no_san'))
+                    if add_lot_suffix:
+                        out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']} 번지", city),'combo_main_no_san_suffix'))
             else:
                 # 부번 없음 → 산 있는/없는 2종
                 if bunji_info['san']=='Y':
                     out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']}", city),'combo_main_no_san'))
+                    if add_lot_suffix:
+                        out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']} 번지", city),'combo_main_no_san_suffix'))
+        if padded_main and bunji_info and padded_main!=bunji_info.get('main',''):
+            if bunji_info.get('sub'):
+                out.append((normalize_city_prefix(f"{gu} {dong} {padded_main}-{bunji_info['sub']}", city),'combo_parsed_full_padded'))
+            out.append((normalize_city_prefix(f"{gu} {dong} {padded_main}", city),'combo_main_only_padded'))
     # 동+번지 추출
     if loc:
         d2_info, bunji2 = extract_dong_bunji(loc)
@@ -309,7 +329,7 @@ def reorder_prefer_lot(candidates: List[Tuple[str,str]]) -> List[Tuple[str,str]]
 
 # ---------------- 지오코딩 ----------------
 
-def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool, prefer_lot_first: bool=False) -> pd.DataFrame:
+def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool, prefer_lot_first: bool=False, force_refresh_coarse: bool=False, pad_lot_width: int=0, add_lot_suffix: bool=False) -> pd.DataFrame:
     if Nominatim is None or RateLimiter is None:
         print('[ERROR] geopy 미설치: pip install geopy'); return df
     geocode_func=None
@@ -337,7 +357,7 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
     except Exception:
         iterator=df.iterrows()
     for idx,row in iterator:
-        candidates=generate_candidates(row, city)
+    candidates=generate_candidates(row, city, pad_lot_width=pad_lot_width, add_lot_suffix=add_lot_suffix)
         if prefer_lot_first:
             candidates=reorder_prefer_lot(candidates)
         used_q=None; status='no_candidate'; lat=None; lon=None; used_tag=''
@@ -346,9 +366,15 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
             if q in cache:
                 lat,lon=cache[q]
                 if lat is not None and lon is not None:
-                    # 태그 기반 원래 status 복원 (정밀도 유지) + 캐시 suffix
-                    status = derive_status_from_tag(tag, fallback_index=i, cached=True)
-                    break
+                    # coarse 재시도 조건 체크
+                    recovered = derive_status_from_tag(tag)
+                    is_coarse = recovered in ('gu_only_ok','gu_dong_ok','dong_ok') or tag in ('gu_only','gu_dong','loc_dong')
+                    if force_refresh_coarse and is_coarse and network:
+                        # 캐시 무시하고 실제 호출 진행 (밑에서 loc 호출)
+                        pass
+                    else:
+                        status = derive_status_from_tag(tag, fallback_index=i, cached=True)
+                        break
                 else:
                     status='cache_na'; continue
             if not network:
@@ -537,6 +563,9 @@ def parse_args():
     ap.add_argument('--debug-out', type=Path, help='append-latlon 모드에서도 디버그 전체 컬럼을 별도 경로에 저장')
     ap.add_argument('--refine-only-input', type=Path, help='기존 full-output(or debug-out) 결과에서 coarse 행만 재정밀 시도하여 결과 갱신. --input 은 원본(append/minimal) 대신 기존 결과 파일을 지정 가능.')
     ap.add_argument('--refine-only-out', type=Path, help='refine-only 결과 저장 경로 (미지정 시 --out 사용)')
+    ap.add_argument('--force-refresh-coarse', action='store_true', help='coarse 계열 캐시(hit)라도 API 재호출하여 세밀 개선 시도')
+    ap.add_argument('--pad-lot-width', type=int, default=0, help='대표지번 본번 zero-pad 자릿수 (예: 3 → 12 -> 012)')
+    ap.add_argument('--add-lot-suffix', action='store_true', help='대표지번/본번 변형에 "번지" 접미어 후보 포함')
     return ap.parse_args()
 
 # ---------------- main ----------------
@@ -569,7 +598,7 @@ def main():
         df=df.head(args.max_rows).copy()
     cache=load_cache(args.cache)
     if not refine_only:
-        result=geocode_frame(df, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, prefer_lot_first=args.prefer_lot_first)
+    result=geocode_frame(df, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, prefer_lot_first=args.prefer_lot_first, force_refresh_coarse=args.force_refresh_coarse, pad_lot_width=args.pad_lot_width, add_lot_suffix=args.add_lot_suffix)
         if args.refine_coarse:
             result = refine_coarse_rows(df, result, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, max_refine=args.max_refine)
     else:
