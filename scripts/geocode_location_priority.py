@@ -71,6 +71,33 @@ PRECISION_RANK_MAP = {
 COARSE_STATUSES = {'gu_only_ok','gu_dong_ok','dong_ok'}
 HIGH_STATUSES = {'dong_bunji_ok','combo_ok','combo_main_ok','dong_main_ok'}
 
+# 태그 기반 status 재도출 (캐시 히트 시 원래 정밀도 복원 목적)
+def derive_status_from_tag(tag: str, fallback_index: int=0, cached: bool=False) -> str:
+    base_map = {
+        'loc_raw':'ok',
+        'loc_simplified':'simplified_ok',
+        'combo_full':'combo_ok',
+        'combo_parsed_full':'combo_ok',
+        'combo_full_no_san':'combo_ok',
+        'combo_main_only':'combo_main_ok',
+        'combo_main_no_san':'combo_main_ok',
+        'loc_dong_bunji':'dong_bunji_ok',
+        'loc_dong_bunji_full':'dong_bunji_ok',
+        'loc_dong_bunji_full_no_san':'dong_bunji_ok',
+        'loc_dong_main':'dong_main_ok',
+        'loc_dong_main_no_san':'dong_main_ok',
+        'loc_dong':'dong_ok',
+        'gu_dong':'gu_dong_ok',
+        'gu_only':'gu_only_ok'
+    }
+    base = base_map.get(tag, 'ok')
+    if cached:
+        # 캐시 히트 구분을 위해 suffix 부여 (정밀도 분류에는 base 사용)
+        if fallback_index>0:
+            return f"{base}_cache_fb{fallback_index}"
+        return f"{base}_cache"
+    return base
+
 # ---------------- I/O ----------------
 
 def read_csv_multi(path: Path) -> pd.DataFrame:
@@ -319,7 +346,8 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
             if q in cache:
                 lat,lon=cache[q]
                 if lat is not None and lon is not None:
-                    status=f'cache_ok' if i==0 else f'cache_ok_fallback{i}'
+                    # 태그 기반 원래 status 복원 (정밀도 유지) + 캐시 suffix
+                    status = derive_status_from_tag(tag, fallback_index=i, cached=True)
                     break
                 else:
                     status='cache_na'; continue
@@ -374,7 +402,7 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
 def classify_precision(status: str) -> int:
     return PRECISION_RANK_MAP.get(status, 2)
 
-def refine_coarse_rows(df_orig: pd.DataFrame, result: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool, max_refine: int=50) -> pd.DataFrame:
+def refine_coarse_rows(df_orig: pd.DataFrame, result: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool, max_refine: int=50, duplicate_sensitive: bool=True) -> pd.DataFrame:
     """coarse(저정밀) status 행에 대해 지번 기반 후보만 다시 시도.
     max_refine: 과도한 API 호출 방지 상한.
     """
@@ -392,7 +420,20 @@ def refine_coarse_rows(df_orig: pd.DataFrame, result: pd.DataFrame, city: str, d
         print('[REFINE] 초기화 실패:', e); return result
 
     work = result.copy()
-    coarse_mask = work['geocode_status'].isin(COARSE_STATUSES) & work['대표지번'].notna()
+    # 1차 coarse: 명시적 coarse
+    coarse_mask = work['geocode_status'].str.replace('_cache_fb\d+','', regex=True).str.replace('_cache','', regex=True).isin(COARSE_STATUSES)
+    # 캐시된 상태 중 coarse 类 (dong/gu) 포함
+    coarse_mask = coarse_mask | work['geocode_status'].str.contains('(gu_only_ok|gu_dong_ok|dong_ok)_cache', regex=True)
+    # 대표지번이 있어야 세밀 재시도 가능
+    coarse_mask = coarse_mask & work['대표지번'].notna()
+    # 중복 클러스터 기반 확대 (옵션)
+    if duplicate_sensitive:
+        dup_counts = work.groupby(['lat','lon']).size()
+        multi_idx = dup_counts[dup_counts>2].index  # 3개 이상
+        multi_mask = work.set_index(['lat','lon']).index.isin(multi_idx)
+        # 동/구 기반 태그 & 클러스터 큰 경우 포함
+        coarse_mask = coarse_mask | (multi_mask & work['geocode_tag'].isin(['gu_only','gu_dong','loc_dong']))
+    # 과도한 호출 제한
     target_indices = work[coarse_mask].index.tolist()[:max_refine]
     if not target_indices:
         print('[REFINE] coarse 대상 없음')
