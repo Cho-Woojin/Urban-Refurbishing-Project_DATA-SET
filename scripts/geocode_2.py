@@ -9,9 +9,9 @@ from pathlib import Path
 
 def parse_args():
     ap = argparse.ArgumentParser(description='Geocode 결과 중복/정밀도 진단')
-    ap.add_argument('--input', type=Path, default=Path('outputs/주택정비형_신통_geocoded_20251007_1046.csv'))
+    ap.add_argument('--input', type=Path, default=Path('outputs/주택정비형_신통_geocoded_full.csv'))
     ap.add_argument('--refine-candidates-out', type=Path, help='coarse 또는 proxy-coarse 행 목록 CSV 경로')
-    ap.add_argument('--top-n', type=int, default=10, help='상위 중복 좌표 출력 수')
+    ap.add_argument('--top-n', type=int, default=15, help='상위 중복 좌표 출력 수')
     ap.add_argument('--cluster-threshold', type=int, default=3, help='refine 후보로 간주할 최소 클러스터 크기')
     return ap.parse_args()
 
@@ -103,9 +103,11 @@ if not dups.empty:
         if refine_mask is not None:
             cluster_keys = set(tuple(x) for x in multi[['lat','lon']].values if x[0]==x[0] and x[1]==x[1])
             refine_rows = df[refine_mask & df.apply(lambda r: (r['lat'],r['lon']) in cluster_keys, axis=1)].copy()
-            # 클러스터 크기 조건 추가
-            refine_rows['dup_count'] = refine_rows.apply(lambda r: int(dups[(dups['lat']==r['lat']) & (dups['lon']==r['lon'])]['count'].iloc[0]), axis=1)
-            refine_rows = refine_rows[refine_rows['dup_count']>=args.cluster_threshold]
+            if not refine_rows.empty:
+                # dup_count 계산: 좌표 기준으로 dups 와 merge
+                refine_rows = refine_rows.merge(dups, on=['lat','lon'], how='left', suffixes=('','_dup'))
+                refine_rows.rename(columns={'count':'dup_count'}, inplace=True)
+                refine_rows = refine_rows[refine_rows['dup_count']>=args.cluster_threshold]
             print(f"[REFINE CANDIDATES] rows={len(refine_rows)} (cluster_threshold={args.cluster_threshold})")
             if args.refine_candidates_out and len(refine_rows)>0:
                 args.refine_candidates_out.parent.mkdir(parents=True, exist_ok=True)
