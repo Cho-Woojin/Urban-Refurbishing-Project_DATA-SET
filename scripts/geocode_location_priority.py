@@ -22,7 +22,7 @@
 자동 output 파일명 생성 예시:
         python scripts/geocode_location_priority.py \
                 --input outputs/주택정비형_신통.csv \
-                --out outputs/주택정비형_신통_geocoded_20240613_1530.csv \
+                --out outputs/주택정비형_신통_geocoded_20251007_1046.csv \
                 --cache outputs/geocode_cache_location.json \
                 --append-latlon
 
@@ -494,6 +494,8 @@ def parse_args():
     ap.add_argument('--dedupe-jitter', action='store_true', help='중복 좌표에 작은 jitter를 적용하여 시각적 겹침 최소화 (lat_raw/lon_raw 보존)')
     ap.add_argument('--jitter-radius', type=float, default=0.00015, help='dedupe-jitter 적용시 최대 반경(degree)')
     ap.add_argument('--debug-out', type=Path, help='append-latlon 모드에서도 디버그 전체 컬럼을 별도 경로에 저장')
+    ap.add_argument('--refine-only-input', type=Path, help='기존 full-output(or debug-out) 결과에서 coarse 행만 재정밀 시도하여 결과 갱신. --input 은 원본(append/minimal) 대신 기존 결과 파일을 지정 가능.')
+    ap.add_argument('--refine-only-out', type=Path, help='refine-only 결과 저장 경로 (미지정 시 --out 사용)')
     return ap.parse_args()
 
 # ---------------- main ----------------
@@ -504,7 +506,20 @@ def main():
         print('[INFO] --retry-simplify 플래그는 더 이상 필요하지 않아 무시됩니다 (자동 단순화 내장).')
     if not args.input.exists():
         print('[ERROR] 입력 없음', args.input); return 2
-    df=read_csv_multi(args.input)
+    # refine-only 모드 판단: refine-only-input 이 주어졌고 해당 파일에 geocode_status 존재해야 함
+    refine_only = False
+    if args.refine_only_input:
+        if not args.refine_only_input.exists():
+            print('[ERROR] --refine-only-input 파일 없음:', args.refine_only_input); return 2
+        temp_df = read_csv_multi(args.refine_only_input)
+        if 'geocode_status' not in temp_df.columns:
+            print('[ERROR] refine-only 대상에 geocode_status 없음 (full-output 또는 debug-out 파일 필요)'); return 2
+        refine_only = True
+        result = temp_df.copy()
+        # 원본 df는 candidate 재생성 위해 필요할 수도 있으나 refine 단계는 row 데이터 참조(대표지번 등) 위해 동일 DataFrame 사용
+        df = temp_df.copy()
+    else:
+        df=read_csv_multi(args.input)
     # 필수 컬럼 존재 여부
     missing=[c for c in CORE_COLS if c not in df.columns]
     if missing:
@@ -512,9 +527,13 @@ def main():
     if args.max_rows:
         df=df.head(args.max_rows).copy()
     cache=load_cache(args.cache)
-    result=geocode_frame(df, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, prefer_lot_first=args.prefer_lot_first)
-    # refine pass
-    if args.refine_coarse:
+    if not refine_only:
+        result=geocode_frame(df, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, prefer_lot_first=args.prefer_lot_first)
+        if args.refine_coarse:
+            result = refine_coarse_rows(df, result, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, max_refine=args.max_refine)
+    else:
+        # refine-only 모드에서는 coarse 행 재시도만 수행 (refine-coarse 플래그와 무관하게 실행)
+        print('[INFO] refine-only 모드: coarse 행 재정밀 시도 시작')
         result = refine_coarse_rows(df, result, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, max_refine=args.max_refine)
     save_cache(cache, args.cache)
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -524,13 +543,17 @@ def main():
     if args.append_latlon and args.full_output:
         print('[WARN] --append-latlon 과 --full-output 동시 지정 → --full-output 우선 적용')
 
-    if args.full_output:
+    target_out = args.out
+    if refine_only and args.refine_only_out:
+        target_out = args.refine_only_out
+
+    if args.full_output and not refine_only:
         # 디버그 포함 전체 출력
-        if args.out.suffix.lower()=='.parquet':
-            result.to_parquet(args.out, index=False)
+        if target_out.suffix.lower()=='.parquet':
+            result.to_parquet(target_out, index=False)
         else:
-            result.to_csv(args.out, index=False, encoding='utf-8-sig')
-    elif args.append_latlon:
+            result.to_csv(target_out, index=False, encoding='utf-8-sig')
+    elif args.append_latlon and not refine_only:
         # 원본 + lat, lon 두 컬럼만 추가
         base_cols=[c for c in df.columns]
         append_df=result[['lat','lon']]
@@ -548,10 +571,10 @@ def main():
             merged['lat']=result_for_jitter['lat']
             merged['lon']=result_for_jitter['lon']
             # 필요시 jitter 원본 좌표 보존 파일(debug-out)에서 확인
-        if args.out.suffix.lower()=='.parquet':
-            merged.to_parquet(args.out, index=False)
+        if target_out.suffix.lower()=='.parquet':
+            merged.to_parquet(target_out, index=False)
         else:
-            merged.to_csv(args.out, index=False, encoding='utf-8-sig')
+            merged.to_csv(target_out, index=False, encoding='utf-8-sig')
         # debug-out 저장 (원본 result 기준 혹은 jitter 적용 후)
         if args.debug_out:
             debug_df = result.copy()
@@ -563,16 +586,16 @@ def main():
             else:
                 debug_df.to_csv(args.debug_out, index=False, encoding='utf-8-sig')
             print(f"[DEBUG-OUT] 저장: {args.debug_out}")
-    else:
+    elif not refine_only:
         # 최소 출력 (기존 동작 유지)
         minimal_df=result[['lat','lon','success']].copy()
         if args.dedupe_jitter:
             j2 = dedupe_jitter(result[['lat','lon']].assign(lat_raw=result['lat'], lon_raw=result['lon']).copy(), jitter_radius=args.jitter_radius)
             minimal_df['lat']=j2['lat']; minimal_df['lon']=j2['lon']
-        if args.out.suffix.lower()=='.parquet':
-            minimal_df.to_parquet(args.out, index=False)
+        if target_out.suffix.lower()=='.parquet':
+            minimal_df.to_parquet(target_out, index=False)
         else:
-            minimal_df.to_csv(args.out, index=False, encoding='utf-8-sig')
+            minimal_df.to_csv(target_out, index=False, encoding='utf-8-sig')
         if args.debug_out:
             args.debug_out.parent.mkdir(parents=True, exist_ok=True)
             if args.debug_out.suffix.lower()=='.parquet':
@@ -580,6 +603,13 @@ def main():
             else:
                 result.to_csv(args.debug_out, index=False, encoding='utf-8-sig')
             print(f"[DEBUG-OUT] 저장: {args.debug_out}")
+    else:
+        # refine-only 결과 항상 full 컬럼 보존 (입력과 동일 구조)
+        if target_out.suffix.lower()=='.parquet':
+            result.to_parquet(target_out, index=False)
+        else:
+            result.to_csv(target_out, index=False, encoding='utf-8-sig')
+        print(f"[REFINE-ONLY] 저장: {target_out}")
     # 간단 통계
     stat=result['geocode_status'].value_counts(dropna=False).to_dict()
     # coarse/precision 통계 (디버그 목적)
