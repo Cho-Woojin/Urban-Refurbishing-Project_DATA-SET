@@ -357,7 +357,7 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
     except Exception:
         iterator=df.iterrows()
     for idx,row in iterator:
-    candidates=generate_candidates(row, city, pad_lot_width=pad_lot_width, add_lot_suffix=add_lot_suffix)
+        candidates=generate_candidates(row, city, pad_lot_width=pad_lot_width, add_lot_suffix=add_lot_suffix)
         if prefer_lot_first:
             candidates=reorder_prefer_lot(candidates)
         used_q=None; status='no_candidate'; lat=None; lon=None; used_tag=''
@@ -447,7 +447,7 @@ def refine_coarse_rows(df_orig: pd.DataFrame, result: pd.DataFrame, city: str, d
 
     work = result.copy()
     # 1차 coarse: 명시적 coarse
-    coarse_mask = work['geocode_status'].str.replace('_cache_fb\d+','', regex=True).str.replace('_cache','', regex=True).isin(COARSE_STATUSES)
+    coarse_mask = work['geocode_status'].str.replace(r'_cache_fb\d+','', regex=True).str.replace('_cache','', regex=True).isin(COARSE_STATUSES)
     # 캐시된 상태 중 coarse 类 (dong/gu) 포함
     coarse_mask = coarse_mask | work['geocode_status'].str.contains('(gu_only_ok|gu_dong_ok|dong_ok)_cache', regex=True)
     # 대표지번이 있어야 세밀 재시도 가능
@@ -598,9 +598,31 @@ def main():
         df=df.head(args.max_rows).copy()
     cache=load_cache(args.cache)
     if not refine_only:
-    result=geocode_frame(df, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, prefer_lot_first=args.prefer_lot_first, force_refresh_coarse=args.force_refresh_coarse, pad_lot_width=args.pad_lot_width, add_lot_suffix=args.add_lot_suffix)
+        result=geocode_frame(
+            df,
+            args.city_prefix,
+            args.delay,
+            cache,
+            args.user_agent,
+            network=not args.disable_network,
+            insecure=args.insecure,
+            prefer_lot_first=args.prefer_lot_first,
+            force_refresh_coarse=args.force_refresh_coarse,
+            pad_lot_width=args.pad_lot_width,
+            add_lot_suffix=args.add_lot_suffix,
+        )
         if args.refine_coarse:
-            result = refine_coarse_rows(df, result, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, max_refine=args.max_refine)
+            result = refine_coarse_rows(
+                df,
+                result,
+                args.city_prefix,
+                args.delay,
+                cache,
+                args.user_agent,
+                network=not args.disable_network,
+                insecure=args.insecure,
+                max_refine=args.max_refine,
+            )
     else:
         # refine-only 모드에서는 coarse 행 재시도만 수행 (refine-coarse 플래그와 무관하게 실행)
         print('[INFO] refine-only 모드: coarse 행 재정밀 시도 시작')
