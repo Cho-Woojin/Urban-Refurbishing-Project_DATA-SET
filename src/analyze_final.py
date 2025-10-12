@@ -455,6 +455,12 @@ def main():
     # 기준 컬럼 선택(원본 우선, 없으면 표준)
     gu_col = pick_col(df, ["자치구", "자치구_std"]) or "자치구"
     type_col = pick_col(df, ["사업유형", "사업유형_std"]) or "사업유형"
+    # 입력에 사업유형 컬럼이 전혀 없는 경우(예: 단일 유형 표본) 안전하게 대체 컬럼 생성
+    if type_col not in df.columns:
+        fallback_type_col = "사업유형"
+        if fallback_type_col not in df.columns:
+            df[fallback_type_col] = "전체"
+        type_col = fallback_type_col
     phase_col = find_phase_column(df)
     addr_col = pick_col(df, ["위치"])  # 원본 위치 컬럼 있으면 사용
 
@@ -660,7 +666,8 @@ def main():
             # 단계 순서 재배열 (지정 외 단계는 뒤에 추가)
             extra_phases = [p for p in mat.index if p not in user_phase_order]
             full_phase_order = user_phase_order + [p for p in extra_phases if p not in user_phase_order]
-            mat = mat.reindex(full_phase_order)
+            # 행 재배열 시 결측(없던 단계)이 생길 수 있어 0으로 채우고 정수형으로 유지
+            mat = mat.reindex(full_phase_order).fillna(0).astype(int)
             plt.figure(figsize=(14, 6))
             sns.heatmap(mat, annot=True, fmt="d", cmap="YlOrRd")
             plt.title("사업추진단계(군집) × 자치구 건수 Heatmap")
