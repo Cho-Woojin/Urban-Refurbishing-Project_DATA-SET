@@ -22,7 +22,7 @@
 자동 output 파일명 생성 예시:
         python scripts/geocode_location_priority.py \
                 --input outputs/주택정비형_신통.csv \
-                --out outputs/주택정비형_신통_geocoded_20240613_1530.csv \
+                --out outputs/주택정비형_신통_geocoded_20251007_1046.csv \
                 --cache outputs/geocode_cache_location.json \
                 --append-latlon
 
@@ -70,6 +70,33 @@ PRECISION_RANK_MAP = {
 
 COARSE_STATUSES = {'gu_only_ok','gu_dong_ok','dong_ok'}
 HIGH_STATUSES = {'dong_bunji_ok','combo_ok','combo_main_ok','dong_main_ok'}
+
+# 태그 기반 status 재도출 (캐시 히트 시 원래 정밀도 복원 목적)
+def derive_status_from_tag(tag: str, fallback_index: int=0, cached: bool=False) -> str:
+    base_map = {
+        'loc_raw':'ok',
+        'loc_simplified':'simplified_ok',
+        'combo_full':'combo_ok',
+        'combo_parsed_full':'combo_ok',
+        'combo_full_no_san':'combo_ok',
+        'combo_main_only':'combo_main_ok',
+        'combo_main_no_san':'combo_main_ok',
+        'loc_dong_bunji':'dong_bunji_ok',
+        'loc_dong_bunji_full':'dong_bunji_ok',
+        'loc_dong_bunji_full_no_san':'dong_bunji_ok',
+        'loc_dong_main':'dong_main_ok',
+        'loc_dong_main_no_san':'dong_main_ok',
+        'loc_dong':'dong_ok',
+        'gu_dong':'gu_dong_ok',
+        'gu_only':'gu_only_ok'
+    }
+    base = base_map.get(tag, 'ok')
+    if cached:
+        # 캐시 히트 구분을 위해 suffix 부여 (정밀도 분류에는 base 사용)
+        if fallback_index>0:
+            return f"{base}_cache_fb{fallback_index}"
+        return f"{base}_cache"
+    return base
 
 # ---------------- I/O ----------------
 
@@ -188,7 +215,7 @@ def extract_dong_bunji(s: str) -> Tuple[str,str]:  # 유지: 기존 인터페이
 
 # ---------------- 후보 생성 ----------------
 
-def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
+def generate_candidates(row: pd.Series, city: str, pad_lot_width: int=0, add_lot_suffix: bool=False) -> List[Tuple[str,str]]:
     """후보 (query, tag) 리스트.
     tag: 어떤 전략으로 나온 후보인지(우선순위/출처 표시)
     우선순위 순으로 append
@@ -199,6 +226,12 @@ def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
     dong = normalize_base(row.get('법정동'))
     main_raw = normalize_base(row.get('대표지번'))
     bunji_info = parse_bunji(main_raw) if main_raw else None
+    padded_main=None
+    if bunji_info and pad_lot_width>0:
+        try:
+            padded_main = bunji_info['main'].zfill(pad_lot_width)
+        except Exception:
+            padded_main=None
 
     if loc:
         out.append((normalize_city_prefix(loc, city),'loc_raw'))
@@ -209,6 +242,10 @@ def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
     if gu and dong and main_raw:
         # 대표지번 전체 (원문 그대로)
         out.append((normalize_city_prefix(f"{gu} {dong} {main_raw}", city),'combo_full'))
+        if add_lot_suffix:
+            out.append((normalize_city_prefix(f"{gu} {dong} {main_raw} 번지", city),'combo_full_suffix'))
+        if padded_main and bunji_info and padded_main!=bunji_info.get('main',''):
+            out.append((normalize_city_prefix(f"{gu} {dong} {padded_main}", city),'combo_full_padded'))
         # 파싱 성공 시 본번/본번-부번 변형 후보 추가
         if bunji_info:
             # 산 여부 유지/비유지 버전
@@ -218,14 +255,24 @@ def generate_candidates(row: pd.Series, city: str) -> List[Tuple[str,str]]:
                 out.append((normalize_city_prefix(f"{gu} {dong} {san_prefix}{bunji_info['main']}-{bunji_info['sub']}", city),'combo_parsed_full'))
                 # 본번만 (산여부 유지)
                 out.append((normalize_city_prefix(f"{gu} {dong} {san_prefix}{bunji_info['main']}", city),'combo_main_only'))
+                if add_lot_suffix:
+                    out.append((normalize_city_prefix(f"{gu} {dong} {san_prefix}{bunji_info['main']} 번지", city),'combo_main_only_suffix'))
                 # 산 제거 변형(산 번지일 경우) - 일부 데이터 소스가 산 누락
                 if bunji_info['san']=='Y':
                     out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']}-{bunji_info['sub']}", city),'combo_full_no_san'))
                     out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']}", city),'combo_main_no_san'))
+                    if add_lot_suffix:
+                        out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']} 번지", city),'combo_main_no_san_suffix'))
             else:
                 # 부번 없음 → 산 있는/없는 2종
                 if bunji_info['san']=='Y':
                     out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']}", city),'combo_main_no_san'))
+                    if add_lot_suffix:
+                        out.append((normalize_city_prefix(f"{gu} {dong} {bunji_info['main']} 번지", city),'combo_main_no_san_suffix'))
+        if padded_main and bunji_info and padded_main!=bunji_info.get('main',''):
+            if bunji_info.get('sub'):
+                out.append((normalize_city_prefix(f"{gu} {dong} {padded_main}-{bunji_info['sub']}", city),'combo_parsed_full_padded'))
+            out.append((normalize_city_prefix(f"{gu} {dong} {padded_main}", city),'combo_main_only_padded'))
     # 동+번지 추출
     if loc:
         d2_info, bunji2 = extract_dong_bunji(loc)
@@ -282,7 +329,7 @@ def reorder_prefer_lot(candidates: List[Tuple[str,str]]) -> List[Tuple[str,str]]
 
 # ---------------- 지오코딩 ----------------
 
-def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool, prefer_lot_first: bool=False) -> pd.DataFrame:
+def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool, prefer_lot_first: bool=False, force_refresh_coarse: bool=False, pad_lot_width: int=0, add_lot_suffix: bool=False) -> pd.DataFrame:
     if Nominatim is None or RateLimiter is None:
         print('[ERROR] geopy 미설치: pip install geopy'); return df
     geocode_func=None
@@ -310,7 +357,7 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
     except Exception:
         iterator=df.iterrows()
     for idx,row in iterator:
-        candidates=generate_candidates(row, city)
+        candidates=generate_candidates(row, city, pad_lot_width=pad_lot_width, add_lot_suffix=add_lot_suffix)
         if prefer_lot_first:
             candidates=reorder_prefer_lot(candidates)
         used_q=None; status='no_candidate'; lat=None; lon=None; used_tag=''
@@ -319,8 +366,15 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
             if q in cache:
                 lat,lon=cache[q]
                 if lat is not None and lon is not None:
-                    status=f'cache_ok' if i==0 else f'cache_ok_fallback{i}'
-                    break
+                    # coarse 재시도 조건 체크
+                    recovered = derive_status_from_tag(tag)
+                    is_coarse = recovered in ('gu_only_ok','gu_dong_ok','dong_ok') or tag in ('gu_only','gu_dong','loc_dong')
+                    if force_refresh_coarse and is_coarse and network:
+                        # 캐시 무시하고 실제 호출 진행 (밑에서 loc 호출)
+                        pass
+                    else:
+                        status = derive_status_from_tag(tag, fallback_index=i, cached=True)
+                        break
                 else:
                     status='cache_na'; continue
             if not network:
@@ -374,7 +428,7 @@ def geocode_frame(df: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tup
 def classify_precision(status: str) -> int:
     return PRECISION_RANK_MAP.get(status, 2)
 
-def refine_coarse_rows(df_orig: pd.DataFrame, result: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool, max_refine: int=50) -> pd.DataFrame:
+def refine_coarse_rows(df_orig: pd.DataFrame, result: pd.DataFrame, city: str, delay: float, cache: Dict[str,Tuple[float,float]], user_agent: str, network: bool, insecure: bool, max_refine: int=50, duplicate_sensitive: bool=True) -> pd.DataFrame:
     """coarse(저정밀) status 행에 대해 지번 기반 후보만 다시 시도.
     max_refine: 과도한 API 호출 방지 상한.
     """
@@ -392,7 +446,20 @@ def refine_coarse_rows(df_orig: pd.DataFrame, result: pd.DataFrame, city: str, d
         print('[REFINE] 초기화 실패:', e); return result
 
     work = result.copy()
-    coarse_mask = work['geocode_status'].isin(COARSE_STATUSES) & work['대표지번'].notna()
+    # 1차 coarse: 명시적 coarse
+    coarse_mask = work['geocode_status'].str.replace(r'_cache_fb\d+','', regex=True).str.replace('_cache','', regex=True).isin(COARSE_STATUSES)
+    # 캐시된 상태 중 coarse 类 (dong/gu) 포함
+    coarse_mask = coarse_mask | work['geocode_status'].str.contains('(gu_only_ok|gu_dong_ok|dong_ok)_cache', regex=True)
+    # 대표지번이 있어야 세밀 재시도 가능
+    coarse_mask = coarse_mask & work['대표지번'].notna()
+    # 중복 클러스터 기반 확대 (옵션)
+    if duplicate_sensitive:
+        dup_counts = work.groupby(['lat','lon']).size()
+        multi_idx = dup_counts[dup_counts>2].index  # 3개 이상
+        multi_mask = work.set_index(['lat','lon']).index.isin(multi_idx)
+        # 동/구 기반 태그 & 클러스터 큰 경우 포함
+        coarse_mask = coarse_mask | (multi_mask & work['geocode_tag'].isin(['gu_only','gu_dong','loc_dong']))
+    # 과도한 호출 제한
     target_indices = work[coarse_mask].index.tolist()[:max_refine]
     if not target_indices:
         print('[REFINE] coarse 대상 없음')
@@ -494,6 +561,11 @@ def parse_args():
     ap.add_argument('--dedupe-jitter', action='store_true', help='중복 좌표에 작은 jitter를 적용하여 시각적 겹침 최소화 (lat_raw/lon_raw 보존)')
     ap.add_argument('--jitter-radius', type=float, default=0.00015, help='dedupe-jitter 적용시 최대 반경(degree)')
     ap.add_argument('--debug-out', type=Path, help='append-latlon 모드에서도 디버그 전체 컬럼을 별도 경로에 저장')
+    ap.add_argument('--refine-only-input', type=Path, help='기존 full-output(or debug-out) 결과에서 coarse 행만 재정밀 시도하여 결과 갱신. --input 은 원본(append/minimal) 대신 기존 결과 파일을 지정 가능.')
+    ap.add_argument('--refine-only-out', type=Path, help='refine-only 결과 저장 경로 (미지정 시 --out 사용)')
+    ap.add_argument('--force-refresh-coarse', action='store_true', help='coarse 계열 캐시(hit)라도 API 재호출하여 세밀 개선 시도')
+    ap.add_argument('--pad-lot-width', type=int, default=0, help='대표지번 본번 zero-pad 자릿수 (예: 3 → 12 -> 012)')
+    ap.add_argument('--add-lot-suffix', action='store_true', help='대표지번/본번 변형에 "번지" 접미어 후보 포함')
     return ap.parse_args()
 
 # ---------------- main ----------------
@@ -504,7 +576,20 @@ def main():
         print('[INFO] --retry-simplify 플래그는 더 이상 필요하지 않아 무시됩니다 (자동 단순화 내장).')
     if not args.input.exists():
         print('[ERROR] 입력 없음', args.input); return 2
-    df=read_csv_multi(args.input)
+    # refine-only 모드 판단: refine-only-input 이 주어졌고 해당 파일에 geocode_status 존재해야 함
+    refine_only = False
+    if args.refine_only_input:
+        if not args.refine_only_input.exists():
+            print('[ERROR] --refine-only-input 파일 없음:', args.refine_only_input); return 2
+        temp_df = read_csv_multi(args.refine_only_input)
+        if 'geocode_status' not in temp_df.columns:
+            print('[ERROR] refine-only 대상에 geocode_status 없음 (full-output 또는 debug-out 파일 필요)'); return 2
+        refine_only = True
+        result = temp_df.copy()
+        # 원본 df는 candidate 재생성 위해 필요할 수도 있으나 refine 단계는 row 데이터 참조(대표지번 등) 위해 동일 DataFrame 사용
+        df = temp_df.copy()
+    else:
+        df=read_csv_multi(args.input)
     # 필수 컬럼 존재 여부
     missing=[c for c in CORE_COLS if c not in df.columns]
     if missing:
@@ -512,9 +597,35 @@ def main():
     if args.max_rows:
         df=df.head(args.max_rows).copy()
     cache=load_cache(args.cache)
-    result=geocode_frame(df, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, prefer_lot_first=args.prefer_lot_first)
-    # refine pass
-    if args.refine_coarse:
+    if not refine_only:
+        result=geocode_frame(
+            df,
+            args.city_prefix,
+            args.delay,
+            cache,
+            args.user_agent,
+            network=not args.disable_network,
+            insecure=args.insecure,
+            prefer_lot_first=args.prefer_lot_first,
+            force_refresh_coarse=args.force_refresh_coarse,
+            pad_lot_width=args.pad_lot_width,
+            add_lot_suffix=args.add_lot_suffix,
+        )
+        if args.refine_coarse:
+            result = refine_coarse_rows(
+                df,
+                result,
+                args.city_prefix,
+                args.delay,
+                cache,
+                args.user_agent,
+                network=not args.disable_network,
+                insecure=args.insecure,
+                max_refine=args.max_refine,
+            )
+    else:
+        # refine-only 모드에서는 coarse 행 재시도만 수행 (refine-coarse 플래그와 무관하게 실행)
+        print('[INFO] refine-only 모드: coarse 행 재정밀 시도 시작')
         result = refine_coarse_rows(df, result, args.city_prefix, args.delay, cache, args.user_agent, network=not args.disable_network, insecure=args.insecure, max_refine=args.max_refine)
     save_cache(cache, args.cache)
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -524,13 +635,17 @@ def main():
     if args.append_latlon and args.full_output:
         print('[WARN] --append-latlon 과 --full-output 동시 지정 → --full-output 우선 적용')
 
-    if args.full_output:
+    target_out = args.out
+    if refine_only and args.refine_only_out:
+        target_out = args.refine_only_out
+
+    if args.full_output and not refine_only:
         # 디버그 포함 전체 출력
-        if args.out.suffix.lower()=='.parquet':
-            result.to_parquet(args.out, index=False)
+        if target_out.suffix.lower()=='.parquet':
+            result.to_parquet(target_out, index=False)
         else:
-            result.to_csv(args.out, index=False, encoding='utf-8-sig')
-    elif args.append_latlon:
+            result.to_csv(target_out, index=False, encoding='utf-8-sig')
+    elif args.append_latlon and not refine_only:
         # 원본 + lat, lon 두 컬럼만 추가
         base_cols=[c for c in df.columns]
         append_df=result[['lat','lon']]
@@ -548,10 +663,10 @@ def main():
             merged['lat']=result_for_jitter['lat']
             merged['lon']=result_for_jitter['lon']
             # 필요시 jitter 원본 좌표 보존 파일(debug-out)에서 확인
-        if args.out.suffix.lower()=='.parquet':
-            merged.to_parquet(args.out, index=False)
+        if target_out.suffix.lower()=='.parquet':
+            merged.to_parquet(target_out, index=False)
         else:
-            merged.to_csv(args.out, index=False, encoding='utf-8-sig')
+            merged.to_csv(target_out, index=False, encoding='utf-8-sig')
         # debug-out 저장 (원본 result 기준 혹은 jitter 적용 후)
         if args.debug_out:
             debug_df = result.copy()
@@ -563,16 +678,16 @@ def main():
             else:
                 debug_df.to_csv(args.debug_out, index=False, encoding='utf-8-sig')
             print(f"[DEBUG-OUT] 저장: {args.debug_out}")
-    else:
+    elif not refine_only:
         # 최소 출력 (기존 동작 유지)
         minimal_df=result[['lat','lon','success']].copy()
         if args.dedupe_jitter:
             j2 = dedupe_jitter(result[['lat','lon']].assign(lat_raw=result['lat'], lon_raw=result['lon']).copy(), jitter_radius=args.jitter_radius)
             minimal_df['lat']=j2['lat']; minimal_df['lon']=j2['lon']
-        if args.out.suffix.lower()=='.parquet':
-            minimal_df.to_parquet(args.out, index=False)
+        if target_out.suffix.lower()=='.parquet':
+            minimal_df.to_parquet(target_out, index=False)
         else:
-            minimal_df.to_csv(args.out, index=False, encoding='utf-8-sig')
+            minimal_df.to_csv(target_out, index=False, encoding='utf-8-sig')
         if args.debug_out:
             args.debug_out.parent.mkdir(parents=True, exist_ok=True)
             if args.debug_out.suffix.lower()=='.parquet':
@@ -580,6 +695,13 @@ def main():
             else:
                 result.to_csv(args.debug_out, index=False, encoding='utf-8-sig')
             print(f"[DEBUG-OUT] 저장: {args.debug_out}")
+    else:
+        # refine-only 결과 항상 full 컬럼 보존 (입력과 동일 구조)
+        if target_out.suffix.lower()=='.parquet':
+            result.to_parquet(target_out, index=False)
+        else:
+            result.to_csv(target_out, index=False, encoding='utf-8-sig')
+        print(f"[REFINE-ONLY] 저장: {target_out}")
     # 간단 통계
     stat=result['geocode_status'].value_counts(dropna=False).to_dict()
     # coarse/precision 통계 (디버그 목적)
